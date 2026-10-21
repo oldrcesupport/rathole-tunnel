@@ -93,7 +93,7 @@ const DICT={
 
   t_game_add:'afzoodan service game',l_inb_tls:'port inbound TLS rooye node',l_sni:'SNI (masalan gmtrk.l1t.ir)',
   t_game_cert:'greftan gvahi TLS',l_sni_cert:'SNI (DNS be in server, port 80 azad)',
-  t_add_node:'afzoodan node',l_node_name:'nam node (path)',l_xray_inb:'port inbound Xray',l_api_opt:'port API (ekhtiari)',
+  t_add_node:'afzoodan node',l_node_name:'nam node (path)',l_xray_inb:'port inbound 3x-ui / Xray',l_api_opt:'port API (ekhtiari)',
   t_add_svc:'afzoodan service (hamnam ba Iran)',l_token:'token',l_inbound:'port inbound',
   t_up_add:'afzoodan upstream',l_up_id:'shenase upstream (masalan iran2)',l_up_srv:'server Iran-e dovom (host:port)',
   t_up_addsvc:'afzoodan service be upstream',
@@ -243,7 +243,7 @@ const DICT={
   t_kcp_up:'Enable KCP (upstream)',
   t_game_add:'Add game service',l_inb_tls:'TLS inbound port on node',l_sni:'SNI (e.g. gmtrk.l1t.ir)',
   t_game_cert:'Get TLS certificate',l_sni_cert:'SNI (DNS to this server, port 80 free)',
-  t_add_node:'Add node',l_node_name:'Node name (path)',l_xray_inb:'Xray inbound port',l_api_opt:'API port (optional)',
+  t_add_node:'Add node',l_node_name:'Node name (path)',l_xray_inb:'3x-ui / Xray inbound port',l_api_opt:'API port (optional)',
   t_add_svc:'Add service (same name as Iran)',l_token:'Token',l_inbound:'Inbound port',
   t_up_add:'Add upstream',l_up_id:'Upstream id (e.g. iran2)',l_up_srv:'Second Iran server (host:port)',
   t_up_addsvc:'Add service to upstream',

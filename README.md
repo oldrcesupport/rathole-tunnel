@@ -41,27 +41,32 @@ sudo ratholectl hub on 2087
 
 ---
 
-### ۲. راه‌اندازی سرور خارج (Node):
-ابتدا روی سرور ایران نود را اضافه کرده و توکن را مشاهده کنید:
-```bash
-sudo ratholectl add node1 10001
-sudo ratholectl token node1
-```
+### ۲. راه‌اندازی سرور خارج و ادغام با پنل سنایی ([3x-ui](https://github.com/MHSanaei/3x-ui)):
+ابتدا روی سرور خارج، پنل سنایی و نود تانل را نصب کنید:
 
-سپس وارد سرور خارج شده و اجرا کنید:
 ```bash
+# ۱. نصب پنل محبوب سنایی (3x-ui) روی سرور خارج
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+
+# ۲. دریافت و نصب نود تانل معکوس
 apt-get update -y && apt-get install -y git curl
 git clone https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
 cd /root/rathole-manager
 sudo bash install-node.sh
+```
 
-# اتصال نود به سرور ایران:
+سپس نودها را در سرور ایران ساخته و به خارج وصل کنید:
+```bash
+# روی سرور ایران:
+sudo ratholectl add node1 10001
+sudo ratholectl token node1
+
+# روی سرور خارج:
 sudo ratholenode set SERVER iran.example.com:443
 sudo ratholenode add-svc node1 <YOUR_TOKEN> 10001
-
-# بررسی وضعیت اتصال:
 sudo ratholenode status
 ```
+اکنون وارد پنل ۳x-ui شوید (`http://<IP_KHAREJ>:2053`) و یک اینباند با Listening IP برابر با `127.0.0.1` و پورت `10001` بسازید! تمام کاربران و حجم‌ها را در ۳x-ui مدیریت کنید.
 
 ---
 

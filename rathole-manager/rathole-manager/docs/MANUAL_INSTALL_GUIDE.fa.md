@@ -1,351 +1,249 @@
 # راهنمای جامع نصب و راه‌اندازی دستی (Manual Installation)
-## پروژه تانل معکوس چندمنظوره Rathole Manager
-### (شامل راه‌اندازی کامل حالت معمولی WS و XHTTP + حالت گیمینگ 0-RTT + ضد پکت‌لاس KCP)
+## پروژه تانل معکوس Rathole Manager و ادغام با پنل سنایی ([3x-ui](https://github.com/MHSanaei/3x-ui))
+### (شامل راه‌اندازی اینباندهای WS، XHTTP، گیمینگ 0-RTT Vision و سلاح ضد پکت‌لاس KCP)
 
-این راهنما برای زمانی است که می‌خواهید پروژه را **به صورت دستی و مستقیم (با فایل زیپ و بدون نیاز به گیت‌هاب)** روی سرور ایران و سرور خارج مستقر کنید.
+این راهنما برای زمانی است که می‌خواهید پروژه تانل معکوس را به صورت آفلاین یا مستقیم (با فایل زیپ) مستقر کرده و تمامی اینباندها و کاربران را از طریق **پنل گرافیکی سنایی (3x-ui)** مدیریت کنید. در این روش، شما نیازی به ویرایش دستی فایل‌های Xray در لینوکس ندارید.
 
 ---
 
 ## فهرست مطالب
-1. [پیش‌نیازها و تنظیم دامنه‌ها](#۱-پیش‌نیازها-و-تنظیم-دامنه‌ها)
+1. [پیش‌نیازها و رکوردهای دامنه](#۱-پیش‌نیازها-و-رکوردهای-دامنه)
 2. [گام ۱: انتقال فایل زیپ به هر دو سرور](#۲-گام-۱-انتقال-فایل-زیپ-به-هر-دو-سرور)
-3. [گام ۲: راه‌اندازی سرور ایران (پنل و سرور تانل)](#۳-گام-۲-راه‌اندازی-سرور-ایران-پنل-و-سرور-تانل)
-4. [گام ۳: راه‌اندازی نود در سرور خارج](#۴-گام-۳-راه‌اندازی-نود-در-سرور-خارج)
-5. [گام ۴: کانفیگ حالت معمولی الف - پروتکل WebSocket (WS)](#۵-گام-۴-کانفیگ-حالت-معمولی-الف---پروتکل-websocket-ws)
-6. [گام ۵: کانفیگ حالت معمولی ب - پروتکل فوق‌پیشرفته XHTTP (SplitHTTP)](#۶-گام-۵-کانفیگ-حالت-معمولی-ب---پروتکل-فوق‌پیشرفته-xhttp-splithttp)
-7. [گام ۶: کانفیگ حالت گیمینگ فوق‌سریع (L4 SNI + VLESS-Vision + UDP FullCone)](#۷-گام-۶-کانفیگ-حالت-گیمینگ-فوق‌سریع-l4-sni--vless-vision--udp-fullcone)
-8. [گام ۷: فعال‌سازی سلاح ضد پکت‌لاس گیم (KCP / UDP+FEC روی پورت 443)](#۸-گام-۷-فعال‌سازی-سلاح-ضد-پکت‌لاس-گیم-kcp--udpfec-روی-پورت-443)
-9. [تنظیمات بهینه کلاینت‌ها (v2rayNG, Sing-box, Nekobox)](#۹-تنظیمات-بهینه-کلاینت‌ها-v2rayng-sing-box-nekobox)
-10. [دستورات کاربردی و نگهداری](#۱۰-دستورات-کاربردی-و-نگهداری)
+3. [گام ۲: راه‌اندازی سرور ایران (پنل و Nginx)](#۳-گام-۲-راه‌اندازی-سرور-ایران-پنل-و-nginx)
+4. [گام ۳: نصب پنل سنایی (3x-ui) و نود تانل در سرور خارج](#۴-گام-۳-نصب-پنل-سنایی-3x-ui-و-نود-تانل-در-سرور-خارج)
+5. [گام ۴: ساخت اینباند ترافیک عادی الف (WebSocket) در 3x-ui](#۵-گام-۴-ساخت-اینباند-ترافیک-عادی-الف-websocket-در-3x-ui)
+6. [گام ۵: ساخت اینباند ترافیک عادی ب (XHTTP استتار نوین) در 3x-ui](#۶-گام-۵-ساخت-اینباند-ترافیک-عادی-ب-xhttp-استتار-نوین-در-3x-ui)
+7. [گام ۶: ساخت اینباند گیمینگ فوق‌سریع (L4 Vision 0-RTT) در 3x-ui](#۷-گام-۶-ساخت-اینباند-گیمینگ-فوق‌سریع-l4-vision-0-rtt-در-3x-ui)
+8. [گام ۷: فعال‌سازی سلاح ضد پکت‌لاس KCP روی پورت 443](#۸-گام-۷-فعال‌سازی-سلاح-ضد-پکت‌لاس-kcp-روی-پورت-443)
+9. [دستورات پرکاربرد نگهداری و عیب‌یابی](#۹-دستورات-پرکاربرد-نگهداری-و-عیب‌یابی)
 
 ---
 
-## ۱. پیش‌نیازها و تنظیم دامنه‌ها
+## ۱. پیش‌نیازها و رکوردهای دامنه
 
 | مورد | مقدار پیشنهادی | توضیحات |
 | :--- | :--- | :--- |
-| **سرور ایران** | Ubuntu 20.04/22.04/24.04 یا Debian 11/12 | رم حداقل ۱ گیگابایت، دسترسی روت |
-| **سرور خارج** | Ubuntu یا Debian | با پینگ مناسب به ایران (آلمان، هلند، ترکیه و...) |
-| **دامنه اصلی** | مثلاً `iran.example.com` | رکورد A در Cloudflare مستقیم به **IP سرور ایران** (پروکسی ☁️ خاموش) |
-| **ساب‌دامین گیم** | مثلاً `game.example.com` | رکورد A در Cloudflare مستقیم به **IP سرور ایران** (پروکسی ☁️ خاموش) |
+| **سرور ایران** | اوبونتو یا دبیان | حداقل ۱ گیگابایت رم، دسترسی روت |
+| **سرور خارج** | اوبونتو یا دبیان | پینگ مناسب به ایران، دسترسی روت |
+| **دامنه اصلی** | مثلاً `iran.example.com` | رکورد A در کلودفلر مستقیم به **IP سرور ایران** (پروکسی ☁️ خاموش / DNS Only) |
+| **ساب‌دامین گیم** | مثلاً `game.example.com` | رکورد A در کلودفلر مستقیم به **IP سرور ایران** (پروکسی ☁️ خاموش / DNS Only) |
 | **پورت‌های باز** | `80/tcp`, `443/tcp`, `443/udp` | روی سرور ایران باز باشند |
 
 ---
 
 ## ۲. گام ۱: انتقال فایل زیپ به هر دو سرور
 
-فایل `rathole-manager.zip` در سیستم لوکال شما قرار دارد. آن را به سرور ایران و سرور خارج انتقال دهید.
+فایل `rathole-manager.zip` در سیستم لوکال شما قرار دارد. آن را به سرور ایران و سرور خارج انتقال دهید:
 
-### دستور ارسال فایل از سیستم خودتان (با ترمینال یا PowerShell):
 ```bash
-# ارسال به سرور ایران:
+# ارسال فایل به سرور ایران:
 scp "rathole-manager.zip" root@<IRAN_IP>:/root/
 
-# ارسال به سرور خارج:
+# ارسال فایل به سرور خارج:
 scp "rathole-manager.zip" root@<NODE_IP>:/root/
 ```
 
-### استخراج و آماده‌سازی روی هر دو سرور:
-وارد سرور ایران و سرور خارج شوید و دستورات زیر را وارد کنید:
+سپس وارد هر دو سرور شده و فایل را استخراج کنید:
 ```bash
-# نصب پکیج unzip
 apt-get update -y && apt-get install -y unzip
-
-# استخراج در مسیر rathole-setup
 cd /root
 unzip -o rathole-manager.zip -d rathole-setup
 cd rathole-setup
-
-# رفع خطاهای پرمیشن و فرمت ویندوز (CRLF) با اسکریپت بوت‌استرپ
-chmod +x bootstrap.sh
-sudo bash bootstrap.sh
 ```
 
 ---
 
-## ۳. گام ۲: راه‌اندازی سرور ایران (پنل و سرور تانل)
+## ۳. گام ۲: راه‌اندازی سرور ایران (پنل و Nginx)
 
-روی **سرور ایران** وارد مسیر پروژه شوید:
+روی **سرور ایران** دستورات زیر را اجرا کنید:
+
 ```bash
 cd /root/rathole-setup
 sudo bash install-panel.sh
 ```
 
-### ثبت دامنه و دریافت گواهی SSL:
+### ثبت دامنه اصلی و دریافت SSL رایگان:
 ```bash
 # دامنه اصلی خود را وارد کنید (مثال: iran.example.com):
 sudo ratholectl cert iran.example.com admin@example.com
 ```
 
-### اعمال تنظیمات پرسرعت BBR و بافرهای شبکه:
+### بهینه‌سازی سرعت هسته سیستم (BBR):
 ```bash
 sudo ratholectl tune
 ```
 
-### فعال‌سازی پنل مدیریت وب تحت وب هاب (RatholeHub):
+### فعال‌سازی پنل مدیریت وب RatholeHub:
 ```bash
 sudo ratholectl hub on 2087
 ```
-سپس در مرورگر خود آدرس را باز کنید:
-👉 `https://iran.example.com/hub/`
+🌐 آدرس پنل تحت وب ایران: `https://iran.example.com/hub/`
 
 ---
 
-## ۴. گام ۳: راه‌اندازی نود در سرور خارج
+## ۴. گام ۳: نصب پنل سنایی (3x-ui) و نود تانل در سرور خارج
 
-### تعریف نود روی سرور ایران:
-روی سرور ایران، یک نود جدید ایجاد کنید (مثلاً نود با پورت لوکال 10001 در خارج):
+روی **سرور خارج**، ابتدا پنل سنایی را نصب کنید:
+
+### ۱. نصب پنل محبوب سنایی (3x-ui):
 ```bash
-sudo ratholectl add node1 10001
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
 ```
-سپس دستور زیر را بزنید تا اطلاعات توکن نمایش داده شود:
+- نام کاربری، کلمه عبور و پورت پنل (مثلاً `2053`) را تنظیم کنید.
+- پس از اتمام نصب، وارد پنل وب شوید: `http://<IP_KHAREJ>:2053/`
+
+### ۲. تعریف پورت‌های سرویس روی سرور ایران:
+به ترمینال سرور ایران بروید و پورت‌های محلی نود را ایجاد کنید:
+```bash
+# پورت 10001 برای وب‌سوکت سنایی:
+sudo ratholectl add node1 10001
+
+# پورت 10003 برای XHTTP سنایی:
+sudo ratholectl add xhttp1 10003
+```
+سپس توکن‌های ایجاد شده را بردارید:
 ```bash
 sudo ratholectl token node1
+sudo ratholectl token xhttp1
 ```
 
-### اجرای نصاب روی سرور خارج:
-روی **سرور خارج** وارد پوشه پروژه شده و نصب نود را انجام دهید:
+### ۳. نصب و اتصال نود تانل روی سرور خارج:
+روی سرور خارج وارد پوشه نصب تانل شوید:
 ```bash
 cd /root/rathole-setup
 sudo bash install-node.sh
 ```
-سپس نود را به سرور ایران متصل کنید:
+سپس سرویس‌ها را متصل کنید:
 ```bash
+# تنظیم آدرس سرور ایران
 sudo ratholenode set SERVER iran.example.com:443
-sudo ratholenode add-svc node1 <TOKEN_DARYAFTI> 10001
-```
-برای بررسی وضعیت اتصال در خارج:
-```bash
+
+# اتصال سرویس وب‌سوکت
+sudo ratholenode add-svc node1 <TOKEN_NODE1> 10001
+
+# اتصال سرویس XHTTP
+sudo ratholenode add-svc xhttp1 <TOKEN_XHTTP1> 10003
+
+# بررسی سلامت اتصال
 sudo ratholenode status
 ```
 
 ---
 
-## ۵. گام ۴: کانفیگ حالت معمولی الف - پروتکل WebSocket (WS)
+## ۵. گام ۴: ساخت اینباند ترافیک عادی الف (WebSocket) در 3x-ui
 
-پروتکل محبوب و سازگار با تمامی اپلیکیشن‌ها و سیستم‌عامل‌ها.
+وارد پنل تحت وب **3x-ui** در مرورگر شوید. به بخش **Inbounds (ورودی‌ها)** بروید و روی **Add Inbound** کلیک کنید:
 
-روی **سرور خارج**، فایل کانفیگ Xray (`/usr/local/etc/xray/config.json`) را ویرایش کنید:
-```json
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "vless-ws-in",
-      "port": 10001,
-      "listen": "127.0.0.1",
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          { "id": "e8a93cb4-56c2-48df-b118-86d1d4cb8040", "level": 0 }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "ws",
-        "security": "none",
-        "wsSettings": {
-          "path": "/node1"
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "UseIP" } }
-  ]
-}
-```
-سرویس Xray را ریستارت کنید:
-```bash
-systemctl restart xray
-```
+| فیلد در پنل ۳x-ui | مقدار تنظیمی | توضیحات |
+| :--- | :--- | :--- |
+| **Remark** | `Iran-WS` | نام دلخواه |
+| **Protocol** | `vless` | پروتکل سبک و پرسرعت |
+| **Listening IP** | `127.0.0.1` | **الزامی**: پورت مستقیماً روی اینترنت باز نشود و فقط تانل به آن دسترسی داشته باشد |
+| **Port** | `10001` | پورت لوکال تانل |
+| **Transmission** | `ws` (WebSocket) | نوع اتصال |
+| **Path** | `/node1` | نام سرویسی که در ایران ساختید |
+| **Security** | `none` | گواهی SSL در سرور ایران هندل می‌شود |
 
-### لینک اتصال کلاینت (VLESS WebSocket):
-```text
-vless://e8a93cb4-56c2-48df-b118-86d1d4cb8040@iran.example.com:443?type=ws&security=tls&path=%2Fnode1&sni=iran.example.com#Normal-WS
-```
+### تنظیمات خروجی لینک کلاینت:
+در بخش **Stream / Client Settings** اینباند:
+- **Address**: `iran.example.com`
+- **Port**: `443`
+- **TLS**: فعال (`tls`) با SNI: `iran.example.com`
 
 ---
 
-## ۶. گام ۵: کانفیگ حالت معمولی ب - پروتکل فوق‌پیشرفته XHTTP (SplitHTTP)
+## ۶. گام ۵: ساخت اینباند ترافیک عادی ب (XHTTP استتار نوین) در 3x-ui
 
-### چرا XHTTP؟
-پروتکل **XHTTP** (نسل جدید انتقالات Xray) به جای برقراری ارتباط مداوم وب‌سوکت، ترافیک را در قالب درخواست‌های استاندارد HTTP/2 و HTTP POST/GET ارسال می‌کند. برای سیستم‌های فیلترینگ و هوش مصنوعی، ترافیک کاربر **دقیقاً مانند آپلود فایل یا کار با یک وب‌سایت سازمانی** به نظر می‌رسد و فیلترچی نمی‌تواند آن را به عنوان کانکشن پایدار VPN تشخیص داده یا محدود کند.
+برای کاربرانی که وب‌سوکت روی اپراتور آن‌ها با اختلال مواجه است، پروتکل **XHTTP** ترافیک را به شکل درخواست‌های مجزای HTTP/2 POST مخابره می‌کند که در برابر فیلترینگ هوشمند کاملاً نامرئی است.
 
-> [!TIP]
-> هسته پروژه Rathole Manager با فعال‌سازی `chunked_transfer_encoding on` و `proxy_request_buffering off` و سیستم تفکیک پروب، به طور کامل و ۱۰۰٪ بهینه از XHTTP پشتیبانی می‌کند.
+در پنل **3x-ui** یک اینباند جدید اضافه کنید:
 
-روی **سرور خارج**، پورت دیگری مثلاً `10003` برای XHTTP در نظر می‌گیریم:
-ابتدا این سرویس را در تانل خارج ثبت کنید:
-```bash
-# روی ایران:
-sudo ratholectl add xhttp1 10003
-# روی خارج:
-sudo ratholenode add-svc xhttp1 <TOKEN_XHTTP1> 10003
-```
+| فیلد در پنل ۳x-ui | مقدار تنظیمی | توضیحات |
+| :--- | :--- | :--- |
+| **Remark** | `Iran-XHTTP` | نام دلخواه |
+| **Protocol** | `vless` | پروتکل پایه |
+| **Listening IP** | `127.0.0.1` | امنیت لوکال |
+| **Port** | `10003` | پورت تانل XHTTP |
+| **Transmission** | `xhttp` | پروتکل جدید هسته Xray |
+| **Path** | `/xhttp1` | مطابق نام سرویس در ایران |
+| **Mode** | `auto` | سازگاری هوشمند |
+| **Security** | `none` | رمزگشایی در Nginx ایران |
 
-سپس در فایل `/usr/local/etc/xray/config.json` در سرور خارج، این Inbound را اضافه کنید:
-```json
-{
-  "tag": "vless-xhttp-in",
-  "port": 10003,
-  "listen": "127.0.0.1",
-  "protocol": "vless",
-  "settings": {
-    "clients": [
-      { "id": "e8a93cb4-56c2-48df-b118-86d1d4cb8040", "level": 0 }
-    ],
-    "decryption": "none"
-  },
-  "streamSettings": {
-    "network": "xhttp",
-    "security": "none",
-    "xhttpSettings": {
-      "path": "/xhttp1",
-      "mode": "auto"
-    }
-  }
-}
-```
-سرویس Xray را ریستارت کنید:
-```bash
-systemctl restart xray
-```
-
-### لینک اتصال کلاینت (VLESS XHTTP):
-```text
-vless://e8a93cb4-56c2-48df-b118-86d1d4cb8040@iran.example.com:443?type=xhttp&security=tls&path=%2Fxhttp1&mode=auto&sni=iran.example.com#Normal-XHTTP-Stealth
-```
+### تنظیمات خروجی لینک کلاینت:
+- **Address**: `iran.example.com`
+- **Port**: `443`
+- **TLS**: فعال (`tls`) با SNI: `iran.example.com`
 
 ---
 
-## ۷. گام ۶: کانفیگ حالت گیمینگ فوق‌سریع (L4 SNI + VLESS-Vision + UDP FullCone)
+## ۷. گام ۶: ساخت اینباند گیمینگ فوق‌سریع (L4 Vision 0-RTT) در 3x-ui
 
-این حالت مخصوص بازی‌های آنلاین (Call of Duty, FIFA, Valorant, CS2) و ویس دیسکورد است:
-- صفر میلی‌ثانیه تاخیر اضافه (0-RTT).
-- حذف کامل لایه‌های وب و وب‌سوکت.
-- عبور مستقیم بسته‌های UDP به صورت FullCone.
+این حالت با حذف کامل لایه وب و با فناوری **L4 SNI Passthrough**، ترافیک بازی‌های آنلاین را بدون بافرینگ و با حداقل پینگ ممکن عبور می‌دهد:
 
-### مرحله ۱: افزودن سرویس گیم روی سرور ایران
-ساب‌دامین مخصوص گیم (مثلاً `game.example.com`) که به IP سرور ایران اشاره می‌کند:
+### ۱. تعریف در سرور ایران:
 ```bash
-# روی سرور ایران:
 sudo ratholectl game add game1 10002 game.example.com
+sudo ratholectl game cert game.example.com
+sudo ratholectl game ls
 ```
 
-### مرحله ۲: دریافت گواهی و انتقال به سرور خارج
+### ۲. انتقال گواهی SSL به سرور خارج:
 ```bash
-# روی سرور ایران گواهی را بگیرید:
-sudo ratholectl game cert game.example.com
-
-# انتقال با دستور امن SCP به خارج:
 ssh root@<NODE_IP> "mkdir -p /etc/xray-certs/game.example.com"
 scp /etc/letsencrypt/live/game.example.com/fullchain.pem root@<NODE_IP>:/etc/xray-certs/game.example.com/
 scp /etc/letsencrypt/live/game.example.com/privkey.pem root@<NODE_IP>:/etc/xray-certs/game.example.com/
 ```
 
-### مرحله ۳: اتصال سرویس گیم به نود خارج
+### ۳. اتصال سرویس گیم به نود خارج:
 ```bash
-# روی سرور ایران توکن را مشاهده کنید:
-sudo ratholectl game ls
-
-# روی سرور خارج سرویس را اضافه کنید:
 sudo ratholenode add-svc game1 <GAME_TOKEN> 10002
-```
-
-### مرحله ۴: کانفیگ Xray در سرور خارج (حالت گیم)
-در فایل `/usr/local/etc/xray/config.json` در سرور خارج این بخش را قرار دهید:
-```json
-{
-  "tag": "vless-game-vision-in",
-  "port": 10002,
-  "listen": "127.0.0.1",
-  "protocol": "vless",
-  "settings": {
-    "clients": [
-      {
-        "id": "e8a93cb4-56c2-48df-b118-86d1d4cb8040",
-        "flow": "xtls-rprx-vision",
-        "level": 0
-      }
-    ],
-    "decryption": "none",
-    "fallbacks": [
-      { "dest": 8081 }
-    ]
-  },
-  "streamSettings": {
-    "network": "tcp",
-    "security": "tls",
-    "tlsSettings": {
-      "certificates": [
-        {
-          "certificateFile": "/etc/xray-certs/game.example.com/fullchain.pem",
-          "keyFile": "/etc/xray-certs/game.example.com/privkey.pem"
-        }
-      ]
-    }
-  }
-}
-```
-سرویس فال‌بک وب روی خارج را روشن کرده و Xray را ریستارت کنید:
-```bash
 sudo ratholenode fakeweb start 8081
-systemctl restart xray
 ```
 
-### لینک اتصال کلاینت (VLESS Vision Game):
-```text
-vless://e8a93cb4-56c2-48df-b118-86d1d4cb8040@iran.example.com:443?security=tls&encryption=none&flow=xtls-rprx-vision&headerType=none&type=tcp&sni=game.example.com&fp=chrome#Game-Vision-Direct
-```
+### ۴. ساخت اینباند گیمینگ در 3x-ui:
+یک اینباند جدید در پنل سنایی بسازید:
+- **Remark**: `Game-Vision-Direct`
+- **Protocol**: `vless`
+- **Listening IP**: `127.0.0.1`
+- **Port**: `10002`
+- **Transmission**: `tcp`
+- **Security**: **`tls`** *(در حالت گیمینگ، TLS داخل پنل ۳x-ui فعال است)*
+- **Flow**: **`xtls-rprx-vision`**
+- **Certificate**: مسیر `/etc/xray-certs/game.example.com/fullchain.pem` و فایل کلید `/etc/xray-certs/game.example.com/privkey.pem`
+- **Fallbacks**: پورت `8081`
 
 ---
 
-## ۸. گام ۷: فعال‌سازی سلاح ضد پکت‌لاس گیم (KCP / UDP+FEC روی پورت 443)
+## ۸. گام ۷: فعال‌سازی سلاح ضد پکت‌لاس KCP روی پورت 443
 
-اگر شب‌ها در اینترنت بین‌الملل پکت‌لاس دارید و پینگ بازی شما بالا و پایین می‌پرد:
-1. روی سرور ایران پورت `443/udp` را باز کنید:
+اگر شب‌ها پکت‌لاس دارید:
+1. روی سرور ایران:
    ```bash
    sudo ufw allow 443/udp
-   ```
-2. KCP را با پروفایل متوازن روشن کنید:
-   ```bash
    sudo ratholectl kcp on 443 balanced
    sudo ratholectl kcp status
    ```
-   (کلید امنیتی نمایش داده‌شده را بردارید).
-3. روی سرور خارج دستور سوئیچ به UDP را با کلید بزنید:
+2. روی سرور خارج با کلید دریافتی از ایران:
    ```bash
-   sudo ratholenode kcp on <IRAN_IP>:443 <KEY_DARYAFTI> balanced
+   sudo ratholenode kcp on <IRAN_IP>:443 <کلید_دریافتی> balanced
    ```
 
-**نتیجه**: ارتباط بین دو سرور بدون نیاز به تغییر کانفیگ کاربر، روی بستر UDP با استتار QUIC و تصحیح خطای ریاضی Reed-Solomon منتقل شده و پکت‌لاس صفر می‌شود.
+**نتیجه**: تمام اینباندهای پنل سنایی بدون نیاز به هیچ تغییری، از بستر پرسرعت UDP+FEC عبور کرده و پکت‌لاس صفر می‌شود.
 
 ---
 
-## ۹. تنظیمات بهینه کلاینت‌ها (v2rayNG, Sing-box, Nekobox)
-
-1. **برای گیمینگ**: حتماً گزینه **TUN Mode** را در نرم‌افزار فعال کنید تا تمامی بازی‌ها از پروکسی رد شوند.
-2. **غیرفعال‌سازی Mux در گیمینگ**: گزینه **Multiplex (Mux)** را برای کانفیگ گیمینگ خاموش کنید تا پکت‌ها صف نبندند.
-3. **برای وب‌گردی با XHTTP**: از کلاینت‌های به‌روز که از XHTTP پشتیبانی می‌کنند (v2rayNG نسخه 1.8.20+ یا Sing-box نسخه 1.9+ یا v2rayN 6.40+) استفاده کنید.
-
----
-
-## ۱۰. دستورات کاربردی و نگهداری
+## ۹. دستورات پرکاربرد نگهداری و عیب‌یابی
 
 ```bash
-# بررسی کامل سلامت سیستم و Nginx
+# بررسی سلامت تانل و سرورها:
 sudo ratholectl doctor
 
-# مشاهده وضعیت کلی پورت‌ها و نودها
+# مشاهده وضعیت نودها:
 sudo ratholectl status
 
-# مشاهده لاگ‌های سیستم با سانسور توکن‌ها
+# ریلود بدون قطعی پس از تغییرات:
+sudo ratholectl regen
+
+# مشاهده لاگ‌های تانل:
 sudo ratholectl logs 50
-
-# ساخت بک‌آپ کامل از تنظیمات
-sudo ratholectl backup /root/rathole-backup.json
-
-# مشاهده لیست سرویس‌های گیمینگ
-sudo ratholectl game ls
 ```

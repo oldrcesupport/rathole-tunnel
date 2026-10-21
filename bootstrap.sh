@@ -295,7 +295,7 @@ prompt_node_args(){
   rdp "adres server Iran (masalan panel.example.ir:443): " server
   rdp "name node (masalan trk01): " name
   rdp "token service: " token
-  rdp "port inbound Xray rooye node [2087]: " inbound; inbound="${inbound:-2087}"
+  rdp "port inbound 3x-ui / Xray rooye node [10001]: " inbound; inbound="${inbound:-10001}"
   rdp "token API (akhtiari, khali=rad): " atoken
   PASS_ARGS=(--server "$server" --name "$name" --token "$token" --inbound-port "$inbound")
   if [ -n "$atoken" ]; then
