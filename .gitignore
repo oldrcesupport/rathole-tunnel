@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# Editor and IDE directories
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Runtime / temporary files
+*.tmp
+*.bak
+*.orig
+*.log
+*.lock
+*.pid
+
+# Sensitive runtime certificates and live server state
+/etc/rathole-manager/state.json
+*.pem
+*.key
+*.csr

@@ -1,0 +1,3205 @@
+#!/usr/bin/env bash
+# ratholectl — mdirit nvdhai tunnel rathole + tvlid khodkar server.toml va config nginx
+# rooye server Iran ejra mishavad.
+# nokte: amdan az `set -e` estefade nmiknim chvn algvi `jq | while read` ba pipefail kd
+# khorooji ghirsfr midahad va ba -e askript ra vst tvlid config mibndd. khtaha sarih ba die mdirit mishavand.
+set -uo pipefail
+
+# common.sh agar knar file bashd, tavabe eshteraki ra lvd kon
+# baad az nasb: script dar /usr/local/bin vali common.sh dar /usr/local/share/rathole ast
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")"
+if [ "$SCRIPT_DIR" != "/usr/local/bin" ] && [ -f "$SCRIPT_DIR/common.sh" ]; then
+  source "$SCRIPT_DIR/common.sh"
+elif [ -f /usr/local/share/rathole/common.sh ]; then
+  source /usr/local/share/rathole/common.sh
+elif [ -f "$SCRIPT_DIR/common.sh" ]; then
+  source "$SCRIPT_DIR/common.sh"
+fi
+
+# Temp-ha az command substitution bargasht dade mishavand; har caller baad az commit/masraf
+# khodesh pak mikonad. trap-e subshell-e ghadimi file ra pish az masraf-e caller hazf mikard.
+rth_mktemp(){ mktemp "$@"; }
+rth_mktempd(){ mktemp -d "$@"; }
+
+
+STATE="/etc/rathole-manager/state.json"
+SERVER_TOML="/etc/rathole/server.toml"
+NOISE_TOML="/etc/rathole/noise-server.toml"
+NGINX_CONF="/etc/nginx/conf.d/rathole.conf"
+STREAM_CONF="/etc/nginx/stream.d/rathole-stream.conf"
+RATHOLE_SVC="rathole-server"
+NOISE_SVC="rathole-noise"
+NOISE_PATTERN_DEFAULT="Noise_NK_25519_ChaChaPoly_BLAKE2s"
+BH_TOML="/etc/rathole/backhaul-server.toml"
+BH_SVC="rathole-backhaul-server"
+BH_UNIT="/etc/systemd/system/${BH_SVC}.service"
+
+# TAVAJOH: c_g/c_r/c_y/log/warn/err/die/need_root/kcp_profile inja DOBARE tarif NEMISHAVAND —
+# tanha manba-eshan common.sh ast (bala source shod). ghablan har se file copy-e yeksan dashtand
+# va chon source ghabl az tarif bood, copy-e CLI barande mishod: yani virayesh-e common.sh
+# BI-ASAR bood. baraye kcp_profile in fajee ast — profile bayad DO taraf yeksan bashad.
+# common.sh EJBARI ast (rth_commit_config / install_backhaul / backhaul_mux_profile / ... faghat
+# anja hastand), pas agar load nashode bashad hamin ja ba payam-e roshan mimirim.
+if ! declare -F rth_commit_config >/dev/null 2>&1 || ! declare -F rth_read >/dev/null 2>&1; then
+  printf '[!] common.sh load nashod ya ghadimi ast (/usr/local/share/rathole/common.sh). nasb ra tekrar kon.\n' >&2
+  exit 1
+fi
+# rth_read / has_tty / ask_yn dar common.sh hastand (inja copy NEMISHAVAND).
+# noskhe-ye ghadimi-ye inja ba `[ -r /dev/tty ]` tashkhis midad ke DOROGH ast va baes-e
+# hang-e bi-payam-e nasb mishod — bebin tozih-e kamel dar common.sh.
+
+# need_root dar common.sh ast (inja copy nemishavad — bebin tozih-e bala).
+need_bin(){ command -v "$1" >/dev/null 2>&1 || die "niaz be '$1' ast; aval install-panel.sh ra ejra kon."; }
+
+# ---------- tashkhis-e IP-e omomi-ye server (ba timeout-e kootah) ----------
+# MOHEM: rooye Iran api.ipify aksaran filter ast; bedoon --max-time curl ~2 daghighe hang
+# mishavad va SSH-e hub (masalan "plain show"/"direct show") timeout midahad. hamishe local-IP
+# fallback darim ta print_*_connect faran bargardad. RATHOLE_PUBLIC_IP override-e dasti ast.
+detect_ip(){
+  if [ -n "${RATHOLE_PUBLIC_IP:-}" ]; then printf '%s' "$RATHOLE_PUBLIC_IP"; return; fi
+  local ip=""
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsS4 --connect-timeout 2 --max-time 3 https://api.ipify.org 2>/dev/null)"
+  fi
+  [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  printf '%s' "$ip"
+}
+
+ensure_state(){
+  [ -f "$STATE" ] || die "hnvz init nashode. aval ejra kon: ratholectl init"
+}
+
+gen_token(){ openssl rand -hex 16; }
+
+# masir-e makhfi WebSocket baraye kontroli — ba /_rh/<32 hex> tashkil mishavad.
+# ba source-e hash az state; agar vojood nadarad yek noskhe jadid miavrad va save mikonad.
+ensure_control_path(){
+  local p
+  p="$(jq -r '.control_path // empty' "$STATE" 2>/dev/null)"
+  if [ -z "$p" ]; then
+    p="/_rh/$(openssl rand -hex 16)"
+    state_set '.control_path' "$p" str
+  fi
+  printf '%s\n' "$p"
+}
+
+# ---------- masir-haye qabl-e tanzim (sub / hub) ----------
+# elaghi: 'sub' ya '/sub' ya '/sub/' → tkrar-shavande 'sub' (bedoon slash). pishfarz: moge'e pishvand.
+normalize_path_seg(){
+  local seg="${1#/}"; seg="${seg%/}"
+  echo "$seg" | grep -qE '^[A-Za-z0-9_-]{1,40}$' || die "masir '$1' namotabar ast (faghat harf/adad/_/-, bedoon slash)."
+  printf '%s\n' "$seg"
+}
+# sub_path/hub_path ra az state mikhanad; pishfarz 'sub'/'hub'
+sub_path_seg(){  local p; p="$(jq -r '.sub_path // "sub"'  "$STATE" 2>/dev/null)"; case "$p" in ''|null) p=sub ;; esac; printf '%s\n' "$p"; }
+hub_path_seg(){  local p; p="$(jq -r '.hub_path // "hub"'  "$STATE" 2>/dev/null)"; case "$p" in ''|null) p=hub ;; esac; printf '%s\n' "$p"; }
+
+# ---------- tvlid keypair-e noise (X25519) baraye transport-e ramznegari-shode ----------
+# rathole --genkey do khat mide: "Private Key:" va "Public Key:" (base64). faghat agar hanooz set nashode.
+# NOTE: format-e daghigh-e khoruji-ye 'rathole --genkey' bayad ba binary-ye vaghei tayid shavad;
+#       parse be sorat-e defensive: aval do khat-e base64-e pas az barchasb, dar ghir-e-in-surat har do khat-e base64.
+noise_genkey(){
+  local have_priv have_pub
+  have_priv="$(jq -r '.noise_privkey // empty' "$STATE" 2>/dev/null)"
+  have_pub="$(jq -r '.noise_pubkey // empty' "$STATE" 2>/dev/null)"
+  [ -n "$have_priv" ] && [ -n "$have_pub" ] && return 0   # az ghabl vojood darad
+  command -v rathole >/dev/null 2>&1 || die "binary-e 'rathole' peyda nashod; nemitavan keypair-e noise sakht."
+  local out priv pub
+  out="$(rathole --genkey 2>/dev/null)" || die "'rathole --genkey' shekast khord."
+  # tarjih: khatt-e baʔd az 'Private Key'/'Public Key'; fallback: avval/dovom khatt-e base64-mannad.
+  priv="$(echo "$out" | grep -iA1 'private' | grep -vi 'private' | tr -d '[:space:]' | head -n1)"
+  pub="$(echo "$out"  | grep -iA1 'public'  | grep -vi 'public'  | tr -d '[:space:]' | head -n1)"
+  if [ -z "$priv" ] || [ -z "$pub" ]; then
+    # fallback: hame khatt-haye base64-mannad ra bardar (avval=priv, dovom=pub)
+    local lines; lines="$(echo "$out" | grep -oE '[A-Za-z0-9+/]{40,}={0,2}')"
+    priv="$(echo "$lines" | sed -n '1p')"; pub="$(echo "$lines" | sed -n '2p')"
+  fi
+  [ -n "$priv" ] && [ -n "$pub" ] || die "natvanestam keypair-e noise ra az khoruji-ye rathole --genkey parse konam."
+  state_set '.noise_privkey' "$priv"
+  state_set '.noise_pubkey'  "$pub"
+  log "keypair-e noise tvlid shod (kelid-e omomi montasher mishavad, khsvsi rooye Iran mimanad)."
+}
+
+# ---------- grftn gvahi Let's Encrypt (standalone) ----------
+obtain_cert(){ # $1=domain ; khorooji: masir gvahi dar /etc/letsencrypt
+  local domain="$1" email
+  command -v certbot >/dev/null 2>&1 || { err "certbot nasb nist."; return 1; }
+  rth_read email "aimil baraye Let's Encrypt (khali = bedoon aimil): "
+  warn "baraye grftn gvahi, nginx mvghtaan motevaghef mishavad (niaz be port 80 azad va DNS dorost $domain)."
+  local was_active=0
+  systemctl is-active --quiet nginx && { was_active=1; systemctl stop nginx; }
+  local cargs=(certonly --standalone --non-interactive --agree-tos -d "$domain")
+  if [ -n "$email" ]; then cargs+=(-m "$email"); else cargs+=(--register-unsafely-without-email); fi
+  # MOHEM: certbot mahdudiat-e zamani-ye motmaen nadarad va az dakhel-e Iran (ACME-e
+  # Let's Encrypt aksaran filtr/kond ast) mitavanad SAAT-HA bemanad — an ham daghighan vaghti
+  # nginx ra khamoosh karde-im. pas hatman bounded ejrash mikonim.
+  local cbt="${RATHOLE_CERTBOT_TIMEOUT:-300}" cb=(certbot)
+  command -v timeout >/dev/null 2>&1 && cb=(timeout "$cbt" certbot)
+  if "${cb[@]}" "${cargs[@]}"; then
+    log "gvahi grfth shod: /etc/letsencrypt/live/$domain/"
+    [ "$was_active" -eq 1 ] && systemctl start nginx || true
+    return 0
+  else
+    err "grftn gvahi shekast khord (DNS? port 80 bsth? filtr?)."
+    [ "$was_active" -eq 1 ] && systemctl start nginx || true
+    return 1
+  fi
+}
+
+# ---------- khvandn tanzimat az state ----------
+s_get(){ jq -r "$1" "$STATE"; }
+
+# ---------- backup va restore ----------
+cmd_backup(){
+  need_root; ensure_state
+  local out="${1:-/root/rathole-panel-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
+  tar -czf "$out" -C / "${STATE#/}" 2>/dev/null || die "sakht backup shekast khord."
+  log "backup sakhte shod: $out"
+  echo "shaml state.json (damnh, pvrtha, nvdha, tvknha, SNI). az rooye an hmhchiz baztolid mishavad."
+  warn "gvahiha va filehaye nginx dar in backup nistnd (jda mdirit mishavand)."
+}
+
+cmd_restore(){
+  need_root; need_bin jq
+  local f="${1:-}"
+  [ -n "$f" ] && [ -f "$f" ] || die "file backup peyda nashod: $f"
+  local tmp; tmp="$(rth_mktempd)"
+  tar -xzf "$f" -C "$tmp" 2>/dev/null || die "baz kardan backup shekast khord (frmt?)."
+  local st; st="$(find "$tmp" -name state.json -print -quit 2>/dev/null)"
+  [ -n "$st" ] || die "state.json dar backup nist."
+  jq -e . "$st" >/dev/null 2>&1 || die "state.json namotabar ast."
+  mkdir -p "$(dirname "$STATE")"
+  cp -f "$st" "$STATE"
+  rm -rf "$tmp"
+  log "state restore shod az: $f (damnh: $(s_get '.domain') , nodeha: $(jq '.nodes|length' "$STATE"))"
+  regenerate
+  systemctl enable --now "$RATHOLE_SVC" 2>/dev/null || true
+  log "restore kamel shod. nodeha ba haman tokenha bedoon taghir dvbarh vsl mishavand."
+  warn "motmaen shv gvahiha dar masir dakhl state mvjvdnd (dar ghir ainsvrt dvbarh begir)."
+}
+
+# ---------- dstvr init ----------
+cmd_init(){
+  need_root; need_bin jq
+  local domain="" cert_fc="" cert_key="" ctrl="" fake="" sub="" dstart="" astart="" nconf="" interactive=1 use_certbot=0 restore_file=""
+  # halat flgmhvr (non-interactive) — agar har flgi dade shvd, taamoli nist
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --domain)        domain="$2"; interactive=0; shift 2;;
+      --fullchain)     cert_fc="$2"; shift 2;;
+      --key)           cert_key="$2"; shift 2;;
+      --control-port)  ctrl="$2"; shift 2;;
+      --fake-port)     fake="$2"; shift 2;;
+      --sub-port)      sub="$2"; shift 2;;
+      --data-start)    dstart="$2"; shift 2;;
+      --api-start)     astart="$2"; shift 2;;
+      --nginx-conf)    nconf="$2"; shift 2;;
+      --restore)       restore_file="$2"; shift 2;;
+      --certbot)       use_certbot=1; shift;;
+      *) shift;;
+    esac
+  done
+
+  # halat restore: agar file backup dade shode ya (taamoli) karbar masir dad
+  if [ "$interactive" -eq 1 ] && [ -z "$restore_file" ]; then
+    rth_read restore_file "adres file backup baraye restore (khali = nasb tazh): "
+  fi
+  if [ -n "$restore_file" ]; then
+    cmd_restore "$restore_file"
+    return
+  fi
+
+  # agar taamoli ast vali hich tty nist (curl|bash bedoon-e --domain), natavan porsid → rahnama
+  if [ "$interactive" -eq 1 ] && ! has_tty; then
+    err "domain dade nashode va terminal baraye porsesh dar dastres nist."
+    err "ba flag ejra kon, masalan:"
+    err "   sudo ratholectl init --domain <d> --fullchain <fc> --key <key>"
+    err "ya nasb ra ba install-panel.sh hamrah-e hamin flag-ha bede."
+    die "init bedoon-e domain momken nist."
+  fi
+
+  if [ "$interactive" -eq 1 ]; then
+    rth_read domain "damnh (masalan btli.ir): "
+    [ -n "$domain" ] || die "damnh alzami ast."
+    rth_read cert_fc "masir fullchain.pem [/root/cert/${domain}/fullchain.pem]: "
+    rth_read cert_key "masir privkey.pem [/root/cert/${domain}/privkey.pem]: "
+    rth_read nconf "file config nginx baraye tvlid/riplis [/etc/nginx/conf.d/rathole.conf]: "
+    rth_read ctrl "port kontroli lvkal rathole [2333]: "
+    rth_read fake "port sait fik/panel (default) [8080]: "
+    rth_read sub "port sabaskripshn [2096]: "
+    rth_read dstart "shrva shmarh port dita [1001]: "
+    rth_read astart "shrva shmarh port mdirit(api) [7001]: "
+  fi
+
+  # pishfrzha
+  [ -n "$domain" ] || die "damnh lazem ast (--domain ...)."
+  cert_fc="${cert_fc:-/root/cert/${domain}/fullchain.pem}"
+  cert_key="${cert_key:-/root/cert/${domain}/privkey.pem}"
+  nconf="${nconf:-$NGINX_CONF}"
+  ctrl="${ctrl:-2333}"; fake="${fake:-8080}"; sub="${sub:-2096}"
+  dstart="${dstart:-1001}"; astart="${astart:-7001}"
+
+  # gvahi: chvn maamoolan az ghabl dari, certbot fght dar soorat drkhvast sarih ya entekhab dar halat taamoli
+  if [ ! -f "$cert_fc" ] || [ ! -f "$cert_key" ]; then
+    warn "gvahi dar masir dadhshdh peyda nashod: $cert_fc"
+    if [ "$use_certbot" -eq 1 ] || { [ "$interactive" -eq 1 ] && ask_yn "ba certbot grfth shvd?"; }; then
+      if obtain_cert "$domain"; then
+        cert_fc="/etc/letsencrypt/live/${domain}/fullchain.pem"
+        cert_key="/etc/letsencrypt/live/${domain}/privkey.pem"
+      else
+        warn "bedoon gvahi adamh midhim; ta ghabl az vojood gvahi nginx bala nmiaid."
+      fi
+    else
+      warn "az gvahi mojood estefade mishvd; motmaen shv masir dorost ast."
+    fi
+  else
+    log "gvahi mojood estefade mishavad: $cert_fc"
+  fi
+
+  mkdir -p "$(dirname "$STATE")"
+  jq -n \
+    --arg d "$domain" --arg fc "$cert_fc" --arg key "$cert_key" --arg nc "$nconf" \
+    --argjson ctrl "$ctrl" --argjson fake "$fake" --argjson sub "$sub" \
+    --argjson ds "$dstart" --argjson apst "$astart" \
+    '{domain:$d, cert_fullchain:$fc, cert_key:$key, nginx_conf:$nc, control_port:$ctrl,
+      fake_port:$fake, sub_port:$sub, data_port_start:$ds, api_port_start:$apst, nodes:[]}' \
+    > "$STATE"
+  # masir-e makhfi control WebSocket ra dar state bayaz mikonim (state_set zir set -uo darad)
+  ensure_control_path > /dev/null
+  log "state sakhte shod: $STATE (nginx → $nconf)"
+  regenerate
+  log "init kamel shod."
+}
+
+# ---------- tkhsis port azad ----------
+next_port(){ # $1=field (port|api_local_port) $2=start
+  local field="$1" start="$2" used p
+  # HAME-ye port-haye rezerv ra dar nazar begir (na faghat yek field) ta do bind_addr-e
+  # yeksan (mesl data-port == api-port ya == control/fake/sub/...) sakhte nashavad.
+  used="$(jq -r '
+    ([.nodes[].port // empty]
+     + [.nodes[].api_local_port // empty]
+     + [.control_port, .fake_port, .sub_port, .internal_port, .plain_port, .hub_port, .noise_port, .direct_port, .backhaul_port]
+    ) | map(select(. != null)) | @tsv' "$STATE")"
+  p="$start"
+  while echo "$used" | tr '\t' '\n' | grep -qx "$p"; do p=$((p+1)); done
+  echo "$p"
+}
+
+# ---------- dstvr add ----------
+# nam-haye rezerv-shode ke ba entry-haye sabet-e map-e nginx tadakhol darand
+# (masalan 'sub' ke '~^/<sub_path>/' ra shadow mikonad). in-ha nabayad name-e node bashand.
+# hub/channel/tunnel ham rezerv hastand: hub masir-e panel (pishfarz hub amma qabl-e taghir
+# ba `set hub-path`) va channel/tunnel masir-haye sabet-e backhaul ke mitoavan shadow shavand.
+is_reserved_name(){
+  local n="$1" sp hp
+  sp="$(sub_path_seg)"; hp="$(hub_path_seg)"
+  case "$n" in default|hub|channel|tunnel|"$sp"|"$hp") return 0 ;; *) return 1 ;; esac
+}
+
+cmd_add(){
+  need_root; need_bin jq; ensure_state
+  local name="" inbound="" api_port=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --api-port|-a)
+        shift
+        api_port="${1:-}"
+        ;;
+      --api-port=*)
+        api_port="${1#*=}"
+        ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$1"
+        elif [ -z "$inbound" ]; then
+          inbound="$1"
+        elif [ -z "$api_port" ]; then
+          api_port="$1"
+        fi
+        ;;
+    esac
+    shift || true
+  done
+  [ -n "$name" ] && [ -n "$inbound" ] || die "estefade: ratholectl add <name> <inbound_port> [--api-port <port>]"
+  echo "$name" | grep -qE '^[a-zA-Z0-9_-]+$' || die "name fght hrvf/adad/khttirh mjaz ast."
+  is_reserved_name "$name" && die "name '$name' rezerv shode (ba masir-e sabet-e nginx tadakhol darad); name-e digari entekhab kon."
+  echo "$inbound" | grep -qE '^[0-9]+$' || die "inbound bayad adad bashad."
+  [ -n "$api_port" ] && { echo "$api_port" | grep -qE '^[0-9]+$' || die "port api bayad adad bashad."; }
+  if jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null; then
+    die "node '$name' az ghabl vojood darad."
+  fi
+  # node va reverse-proxy HAR DO dar map-e /<name> mineshinand — esm-e tekrari yani
+  # do location-e mote'arez dar nginx. pas har do jahat check mishavad.
+  if jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1; then
+    die "esm '$name' baraye yek reverse-proxy estefade shode ast (ratholectl proxy ls)."
+  fi
+
+  local dstart astart dport aport token atoken
+  dstart="$(s_get '.data_port_start')"
+  astart="$(s_get '.api_port_start')"
+  dport="$(next_port port "$dstart")"
+  token="$(gen_token)"
+
+  local node_json
+  node_json="$(jq -n --arg n "$name" --argjson p "$dport" \
+                     --argjson ib "$inbound" --arg t "$token" \
+                     '{name:$n, port:$p, inbound_port:$ib, token:$t}')"
+
+  # port mdirit ekhtiari
+  if [ -n "$api_port" ]; then
+    aport="$(next_port api_local_port "$astart")"
+    atoken="$(gen_token)"
+    node_json="$(echo "$node_json" | jq --argjson ap "$aport" --argjson aib "$api_port" --arg at "$atoken" \
+                  '. + {api_local_port:$ap, api_inbound_port:$aib, api_token:$at}')"
+  fi
+
+  # faghat agar neveshtan-e state movafagh bood, success log/regenerate anjam shavad.
+  jq --argjson node "$node_json" '.nodes += [$node]' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE" \
+    || { rm -f "$STATE.tmp"; die "sabt-e node dar state shekast khord."; }
+  log "node '$name' ezafe shod (path=/$name → 127.0.0.1:$dport)."
+  regenerate
+  print_node_install "$name"
+}
+
+# ---------- dstvr rm ----------
+cmd_rm(){
+  need_root; need_bin jq; ensure_state
+  local name="${1:-}"
+  [ -n "$name" ] || die "estefade: ratholectl rm <name>"
+  jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
+  jq --arg n "$name" '.nodes |= map(select(.name!=$n))' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+  log "node '$name' hazf shod."
+  regenerate
+}
+
+# ---------- dstvr ls ----------
+cmd_ls(){
+  need_bin jq; ensure_state
+  local domain; domain="$(s_get '.domain')"
+  # TRANSPORT/SNI-e har node ra ham chap mikonim ta hub betavanad mode-e daghigh-e har
+  # node ra neshan dahad (transport-e khali = ws-e pishfarz). ja-negahdar '-' ta split-e
+  # movghiati (parse_iran_ls) salem bemanad — USER PATH akhar ast va space nadarad.
+  printf '%-14s %-8s %-12s %-10s %-10s %-16s %s\n' "NAME" "PORT" "INBOUND" "API" "TRANSPORT" "SNI" "USER PATH"
+  printf '%s\n' "--------------------------------------------------------------------------------"
+  jq -r '.nodes[] | [.name, (.port|tostring), (.inbound_port|tostring),
+          ((.api_local_port // "-")|tostring),
+          ((.transport // "ws")|tostring),
+          ((.sni // "-")|tostring)] | @tsv' "$STATE" |
+  while IFS=$'\t' read -r n p ib ap tr sni; do
+    printf '%-14s %-8s %-12s %-10s %-10s %-16s %s\n' "$n" "$p" "$ib" "$ap" "$tr" "$sni" "https://$domain/$n"
+  done
+}
+
+# ---------- tvlid server.toml ----------
+gen_server_toml(){
+  local ctrl; ctrl="$(s_get '.control_port')"
+  case "$ctrl" in ''|null) ctrl=2333 ;; esac
+  {
+    echo "# tvlid khodkar tvst ratholectl — dasti virayesh nakon"
+    echo "[server]"
+    echo "bind_addr = \"127.0.0.1:${ctrl}\""
+    echo "heartbeat_interval = 30"
+    echo
+    echo "[server.transport]"
+    echo "type = \"websocket\""
+    echo "[server.transport.websocket]"
+    echo "tls = false"
+    echo
+    # rathole v0.5.0 field-e 'services' ra ALZAMI midanad; agar hich node/service nabashad,
+    # bayad yek table-e khali [server.services] bedahim vagarna: "missing field services".
+    local svc_count
+    svc_count="$(jq '[.nodes[] | select((.transport // "") != "noise" and (.transport // "") != "backhaul")] | length' "$STATE" 2>/dev/null)"
+    if [ "${svc_count:-0}" -eq 0 ]; then
+      echo "[server.services]"
+      echo
+    fi
+    jq -r '.nodes[] | @base64' "$STATE" | while read -r row; do
+      _j(){ echo "$row" | base64 -d | jq -r "$1"; }
+      local name port token aport atoken
+      name="$(_j '.name')"; port="$(_j '.port')"; token="$(_j '.token')"
+      # node-haye noise/backhaul service-eshan tooye toml-e khodeshan mirvad (na inja) —
+      # vagarna do prose yek bind_addr (127.0.0.1:port) ra bind mikonand va dovomi bala nemiayad.
+      case "$(_j '.transport // empty')" in noise|backhaul) continue ;; esac
+      echo "[server.services.${name}]"
+      echo "token = \"${token}\""
+      echo "bind_addr = \"127.0.0.1:${port}\""
+      echo "type = \"tcp\""
+      echo
+      aport="$(_j '.api_local_port // empty')"
+      if [ -n "$aport" ]; then
+        atoken="$(_j '.api_token')"
+        echo "[server.services.${name}_api]"
+        echo "token = \"${atoken}\""
+        echo "bind_addr = \"127.0.0.1:${aport}\""
+        echo "type = \"tcp\""
+        echo
+      fi
+    done
+  } > "$SERVER_TOML.tmp"
+  rth_commit_config "$SERVER_TOML.tmp" "$SERVER_TOML"
+}
+
+# ---------- tvlid noise-server.toml (instans-e dovom-e rathole ba transport-e noise, rooye port-e omomi) ----------
+# faghat node-hayi ke transport=noise darand inja miayand. bind_addr-e server omomi ast (nginx dar in masir nist).
+gen_noise_server_toml(){
+  local nport pat priv
+  nport="$(jq -r '.noise_port // empty' "$STATE" 2>/dev/null)"
+  [ -n "$nport" ] && [ "$nport" != null ] || return 0   # noise khamoosh: toml nemisazim
+  pat="$(jq -r '.noise_pattern // empty' "$STATE" 2>/dev/null)"; [ -n "$pat" ] && [ "$pat" != null ] || pat="$NOISE_PATTERN_DEFAULT"
+  priv="$(jq -r '.noise_privkey // empty' "$STATE" 2>/dev/null)"
+  {
+    echo "# tvlid khodkar tvst ratholectl — dasti virayesh nakon (transport=noise)"
+    echo "[server]"
+    echo "bind_addr = \"0.0.0.0:${nport}\""
+    echo "heartbeat_interval = 30"
+    echo
+    echo "[server.transport]"
+    echo "type = \"noise\""
+    echo "[server.transport.noise]"
+    echo "pattern = \"${pat}\""
+    echo "local_private_key = \"${priv}\""
+    echo
+    # hamchon server-e asli: agar hich node-e noise nabashad, [server.services]-e khali bede.
+    local nsvc_count
+    nsvc_count="$(jq '[.nodes[] | select((.transport // "") == "noise")] | length' "$STATE" 2>/dev/null)"
+    if [ "${nsvc_count:-0}" -eq 0 ]; then
+      echo "[server.services]"
+      echo
+    fi
+    jq -r '.nodes[] | @base64' "$STATE" | while read -r row; do
+      _j(){ echo "$row" | base64 -d | jq -r "$1"; }
+      local name port token aport atoken
+      [ "$(_j '.transport // empty')" = noise ] || continue   # faghat node-haye noise
+      name="$(_j '.name')"; port="$(_j '.port')"; token="$(_j '.token')"
+      echo "[server.services.${name}]"
+      echo "token = \"${token}\""
+      echo "bind_addr = \"127.0.0.1:${port}\""
+      echo "type = \"tcp\""
+      echo
+      aport="$(_j '.api_local_port // empty')"
+      if [ -n "$aport" ]; then
+        atoken="$(_j '.api_token')"
+        echo "[server.services.${name}_api]"
+        echo "token = \"${atoken}\""
+        echo "bind_addr = \"127.0.0.1:${aport}\""
+        echo "type = \"tcp\""
+        echo
+      fi
+    done
+  } > "$NOISE_TOML.tmp"
+  rth_commit_config "$NOISE_TOML.tmp" "$NOISE_TOML"
+}
+
+# ---------- tvlid backhaul-server.toml (core-e joda-ye Go ba SMUX, posht-e nginx/443) ----------
+# backhaul rooye 127.0.0.1 gush midahad; nginx masirhaye /channel va /tunnel ra be an proxy mikonad
+# (haman masirhaye hardcode-shode-ye client-e backhaul) → tak-port 443 / tak-domain hefz mishavad.
+# 'ports' ba format "127.0.0.1:<port_iran>=<inbound_port_node>": backhaul ru-ye port-e mahalli-ye
+# Iran listen mikonad (haman porti ke nginx map be an eshare darad) va be inbound-e node forward mikonad.
+# in daghighan hamon naghshi ast ke rathole ba bind_addr dasht — pas node-e backhaul az server.toml hazf mishavad.
+gen_backhaul_server_toml(){
+  local bport transport token profile exposure bind muxcon muxver muxframe muxrecv muxstream
+  bport="$(jq -r '.backhaul_port // empty' "$STATE" 2>/dev/null)"
+  [ -n "$bport" ] && [ "$bport" != null ] || return 0   # backhaul khamoosh: toml nemisazim
+  # TLS faghat ru-ye nginx terminate mishavad — pas server hamishe variant-e bedoon-e TLS ast (ws/wsmux).
+  # client (node) variant-e TLS-dar (wss/wssmux) ra be nginx:443 mizanad. bebin: backhaul_client_transport.
+  transport="$(jq -r '.backhaul_transport // "wsmux"' "$STATE" 2>/dev/null)"
+  exposure="$(jq -r '.backhaul_exposure // "nginx_tls"' "$STATE" 2>/dev/null)"
+  bind="127.0.0.1"; [ "$exposure" = "direct_ip" ] && bind="0.0.0.0"
+  token="$(jq -r '.backhaul_token // empty' "$STATE" 2>/dev/null)"
+  profile="$(jq -r '.backhaul_profile // "balanced"' "$STATE" 2>/dev/null)"
+  # 'connection_pool' (field-e akhar) faghat samt-e client mani darad — inja dor rikhte mishavad.
+  read -r muxcon muxver muxframe muxrecv muxstream _ <<<"$(backhaul_mux_profile "$profile")"
+  # wss/wssmux faghat dar halat-e direct_ip mani darad (nginx dar masir nist، pas KHOD-e backhaul
+  # TLS ra terminate mikonad). backhaul in do field ra baraye an transport-ha ELZAMI midanad.
+  local tls_fc="" tls_key=""
+  case "$transport" in
+    wss|wssmux)
+      tls_fc="$(jq -r '.ip_tls.fullchain // empty' "$STATE" 2>/dev/null)"
+      tls_key="$(jq -r '.ip_tls.key // empty' "$STATE" 2>/dev/null)"
+      { [ -n "$tls_fc" ] && [ -n "$tls_key" ] && [ -f "$tls_fc" ] && [ -f "$tls_key" ]; } || \
+        die "backhaul ba '${transport}' be gvahi-ye IP niaz darad vali peyda nashod؛ ejra kon: ratholectl ip-cert <IPv4>"
+      ;;
+  esac
+  {
+    echo "# tvlid khodkar tvst ratholectl — dasti virayesh nakon (core=backhaul, transport=${transport})"
+    echo "[server]"
+    echo "bind_addr = \"${bind}:${bport}\""
+    echo "transport = \"${transport}\""
+    echo "token = \"${token}\""
+    if [ -n "$tls_fc" ]; then
+      echo "tls_cert = \"${tls_fc}\""
+      echo "tls_key = \"${tls_key}\""
+    fi
+    echo "heartbeat = 40"
+    echo "channel_size = 2048"
+    echo "mux_con = ${muxcon:-8}"
+    echo "mux_version = ${muxver:-1}"
+    echo "mux_framesize = ${muxframe:-32768}"
+    echo "mux_recievebuffer = ${muxrecv:-4194304}"
+    echo "mux_streambuffer = ${muxstream:-65536}"
+    echo "nodelay = true"
+    echo "log_level = \"info\""
+    echo "web_port = 0"
+    echo
+    echo "ports = ["
+    # data-service: Iran ru-ye 127.0.0.1:<port> listen → node ru-ye <inbound_port>.
+    # api-service (agar --api-port dashte bashad): 127.0.0.1:<api_local_port> → <api_inbound_port>.
+    jq -r '.nodes[] | select((.transport // "") == "backhaul")
+           | ("127.0.0.1:" + (.port|tostring) + "=" + (.inbound_port|tostring)),
+             (select(.api_local_port != null)
+              | "127.0.0.1:" + (.api_local_port|tostring) + "=" + (.api_inbound_port|tostring))' \
+       "$STATE" 2>/dev/null | while read -r mapping; do
+      # CR-e entehai ra pak kon (jq-e vindozi CRLF midahad) vagarna TOML-e namotabar tolid
+      # mishavad va backhaul KOLL-e config ra rad mikonad.
+      mapping="${mapping%$'\r'}"
+      [ -n "$mapping" ] && printf '  "%s",\n' "$mapping"
+    done
+    echo "]"
+  } > "$BH_TOML.tmp"
+  rth_commit_config "$BH_TOML.tmp" "$BH_TOML"
+}
+
+# ---------- tvlid config nginx ----------
+gen_nginx_conf(){
+  local domain cert_fc cert_key ctrl fake sub sub_seg
+  domain="$(s_get '.domain')";       cert_fc="$(s_get '.cert_fullchain')"
+  cert_key="$(s_get '.cert_key')";   ctrl="$(s_get '.control_port')"
+  fake="$(s_get '.fake_port')";      sub="$(s_get '.sub_port')"
+  sub_seg="$(sub_path_seg)"
+  # mghavmsazi: agar mghdari khali/null bvd, pishfarz amn bgzar ta map motabar bmand
+  case "$ctrl" in ''|null) ctrl=2333 ;; esac
+  case "$fake" in ''|null) fake=8080 ;; esac
+  case "$sub"  in ''|null) sub=2096 ;; esac
+  [ -n "$domain" ] && [ "$domain" != null ] || die "state naghes ast (domain khali). dvbarh init bezan."
+  local internal sni_count listen_line
+  internal="$(jq -r '.internal_port // 8443' "$STATE" 2>/dev/null)"; case "$internal" in ''|null) internal=8443 ;; esac
+  sni_count="$(jq '[.nodes[]|select(.sni!=null)]|length' "$STATE" 2>/dev/null)"; [ -n "$sni_count" ] || sni_count=0
+  if [ "$sni_count" -gt 0 ]; then listen_line="listen 127.0.0.1:${internal} ssl http2;"; else listen_line="listen 443 ssl http2;"; fi
+  # damnhhaye ezafi bedoon http2 (jelogiri az hoshdar duplicate listen option)
+  local listen_line_extra="${listen_line/ http2/}"
+  # WSS-e bare-IP SNI-e ghabel-eteka nadarad; pas cert-e IP bayad default-e hamin listener
+  # bashad. domain-ha ba SNI server-block-e khod ra migirand va cert-e omoomi hefz mishavad.
+  local ip_tls_ip ip_tls_fc ip_tls_key listen_line_ip="" ip_tls_block=""
+  ip_tls_ip="$(jq -r '.ip_tls.ip // empty' "$STATE" 2>/dev/null)"
+  ip_tls_fc="$(jq -r '.ip_tls.fullchain // empty' "$STATE" 2>/dev/null)"
+  ip_tls_key="$(jq -r '.ip_tls.key // empty' "$STATE" 2>/dev/null)"
+  if [ -n "$ip_tls_ip" ] && [ -n "$ip_tls_fc" ] && [ -n "$ip_tls_key" ]; then
+    [ -f "$ip_tls_fc" ] && [ -f "$ip_tls_key" ] || die "gvahi IP TLS peyda nashod: $ip_tls_fc / $ip_tls_key"
+    if [ "$sni_count" -gt 0 ]; then
+      listen_line_ip="listen 127.0.0.1:${internal} ssl default_server;"
+    else
+      listen_line_ip="listen 443 ssl http2 default_server;"
+    fi
+  fi
+  # damnh asli default_server ast magar IP TLS faal bashad. agar default-e khareji vojood
+  # darad, be an dast nemizanim; cmd_ip_cert ghabl az faal-sazi in tadakhol ra rad mikonad.
+  local listen_line_primary="$listen_line"
+  if [ "$sni_count" -eq 0 ] && [ -z "$listen_line_ip" ]; then
+    local ext_default=0
+    if grep -rlsE 'listen[^;]*\bdefault_server\b' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null \
+         | grep -vxF "$NGINX_CONF" | grep -q .; then ext_default=1; fi
+    [ "$ext_default" -eq 0 ] && listen_line_primary="listen 443 ssl http2 default_server;"
+  fi
+
+  # location ekhtiari baraye panel web (paidar dar brabr regen)
+  local hub_port hub_seg hub_block=""
+  hub_port="$(jq -r '.hub_port // empty' "$STATE" 2>/dev/null)"
+  hub_seg="$(hub_path_seg)"
+  if [ -n "$hub_port" ] && [ "$hub_port" != null ]; then
+    hub_block="$(cat <<HB
+
+    location /${hub_seg}/ {
+        proxy_pass http://127.0.0.1:${hub_port}/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_read_timeout 3600s;
+    }
+HB
+)"
+  fi
+  # blc-e backhaul: masirhaye hardcode-shode-ye client (/channel control, /tunnel data) ra be
+  # backhaul-server (127.0.0.1) proxy miknd. fght vqti backhaul roshan ast. WS-upgrade + Authorization pass.
+  local bh_port bh_exposure bh_block=""
+  bh_port="$(jq -r '.backhaul_port // empty' "$STATE" 2>/dev/null)"
+  bh_exposure="$(jq -r '.backhaul_exposure // "nginx_tls"' "$STATE" 2>/dev/null)"
+  if [ -n "$bh_port" ] && [ "$bh_port" != null ] && [ "$bh_exposure" = "nginx_tls" ]; then
+    bh_block="$(cat <<BHB
+
+    # backhaul core (SMUX): control channel — client /channel ra seda miznad
+    location = /channel {
+        proxy_pass http://127.0.0.1:${bh_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # backhaul core (SMUX): data tunnels — client /tunnel/<rand> ra seda miznad (prefix)
+    location /tunnel {
+        proxy_pass http://127.0.0.1:${bh_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+BHB
+)"
+  fi
+  # ---- reverse-proxy-haye gheyre-tunnel ----
+  # masir-haye /<name>/ ke be yek upstream-e DELKHAH proxy mishavand (na az tarigh-e rathole).
+  # baraye tunnel-ha/service-haye kastom ke khodeshan mostaghel balaand.
+  # upstream dar cmd_proxy ba regex mahdud shode (faghat scheme://host:port) — inja
+  # dobare check nemikonim vali HICH vorodi-ye digari be conf tazrigh nemishavad.
+  local proxy_block=""
+  if jq -e '(.proxies // []) | length > 0' "$STATE" >/dev/null 2>&1; then
+    proxy_block="$(jq -r '.proxies[] | [.name, .upstream] | @tsv' "$STATE" 2>/dev/null |
+      while IFS=$'\t' read -r pn pu; do
+        pn="${pn%$'\r'}"; pu="${pu%$'\r'}"
+        [ -n "$pn" ] && [ -n "$pu" ] || continue
+        cat <<PXB
+
+    # reverse-proxy (gheyre-tunnel): /${pn}/ -> ${pu}
+    location /${pn}/ {
+        proxy_pass ${pu}/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+PXB
+      done)"
+  fi
+  {
+    echo "# tvlid khodkar tvst ratholectl — dasti virayesh nakon"
+    echo "# masir(path) dita -> port lvkal rathole"
+    echo "map \$uri \$node_raw_port {"
+    echo "    default      ${fake};"
+    jq -r '.nodes[] | select(.sni == null) | [.name,(.port|tostring)] | @tsv' "$STATE" |
+    while IFS=$'\t' read -r n p; do
+      printf '    "~^/%s($|/)"   %s;\n' "$n" "$p"
+    done
+    echo "}"
+    echo
+    echo "# probe defense: poshtibani az WebSocket (ws) va XHTTP (splithttp) dar kenar-e dafa dar barabar-e probe"
+    echo "map \$uri \$is_sub_req {"
+    echo "    default      0;"
+    echo "    \"~^/${sub_seg}($|/)\"   1;"
+    echo "}"
+    echo
+    echo "# tashkhis-e darkhast-e tunnel (WebSocket ya XHTTP stream)"
+    echo "map \"\$http_upgrade:\$request_method:\$content_type\" \$is_tunnel_req {"
+    echo "    \"~*^websocket:\"         1;  # WebSocket"
+    echo "    \"~*:POST:\"              1;  # XHTTP (POST upload/stream)"
+    echo "    \"~*:.*octet-stream\"     1;  # XHTTP (binary stream)"
+    echo "    \"~*:.*xhttp\"            1;  # XHTTP"
+    echo "    default                  0;  # مرورگر یا اسکنر با متد GET معمولی"
+    echo "}"
+    echo
+    echo "map \"\$is_tunnel_req:\$is_sub_req\" \$backend_port {"
+    echo "    \"1:0\"        \$node_raw_port;"
+    echo "    \"1:1\"        \$node_raw_port;"
+    echo "    \"0:1\"        ${sub};"
+    echo "    default      ${fake};"
+    echo "}"
+    echo
+    # masir-e makhfi WebSocket; fallback-e / dige websocket ra be ctrl nemiferestad
+    local ctrl_path
+    ctrl_path="$(jq -r '.control_path // ""' "$STATE" 2>/dev/null)"
+    if [ -z "$ctrl_path" ] || [ "$ctrl_path" = "null" ]; then
+      ctrl_path="$(ensure_control_path)"
+    fi
+    echo "# rishh: sait fik; websocket az masir-e makhfi VA rishh (fallback) be ctrl miravad"
+    echo "map \$http_upgrade \$root_backend {"
+    echo "    default      ${fake};"
+    echo "    websocket    ${ctrl};"
+    echo "}"
+    echo
+    # halat direct-IP: masiryabi ba header (bedoon TLS). faghat agar direct_port set bashad.
+    local direct_port direct_header direct_var direct_fallback
+    direct_port="$(jq -r '.direct_port // empty' "$STATE" 2>/dev/null)"
+    direct_header="$(jq -r '.direct_header // "X-Cdn-Id"' "$STATE" 2>/dev/null)"
+    case "$direct_header" in ''|null) direct_header="X-Cdn-Id" ;; esac
+    if [ -n "$direct_port" ] && [ "$direct_port" != null ]; then
+      # esm-e motaghayer nginx: hrvf kvchk, '-' -> '_', pishvand $http_
+      direct_var="\$http_$(printf '%s' "$direct_header" | tr 'A-Z-' 'a-z_')"
+      # fallback-e branch-e khali: agar direct_port == plain_port -> $backend_port (fall-through be path-map)
+      #   vagarna -> fake_port (faghat sait-e fik)
+      local dp_plain; dp_plain="$(jq -r '.plain_port // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$dp_plain" ] && [ "$dp_plain" != null ] && [ "$dp_plain" = "$direct_port" ]; then
+        direct_fallback="\$backend_port"
+      else
+        direct_fallback="${fake}"
+      fi
+      echo "# map 1: header-e masiryabi (= naam-e node) -> port lvkal rathole"
+      echo "map ${direct_var} \$direct_node {"
+      echo "    default      \"\";"
+      jq -r '.nodes[] | select(.sni == null) | [.name,(.port|tostring)] | @tsv' "$STATE" |
+      while IFS=$'\t' read -r n p; do
+        printf '    "%s"   %s;\n' "$n" "$p"
+      done
+      echo "}"
+      echo
+      echo "# map 2: agar header khali/nashnas -> fallback; vagarna -> port-e node"
+      echo "map \$direct_node \$direct_backend {"
+      echo "    default      \$direct_node;"
+      echo "    \"\"           ${direct_fallback};"
+      echo "}"
+      echo
+    fi
+    if [ -n "$listen_line_ip" ]; then
+      ip_tls_block="$(cat <<IPTLS
+server {
+    ${listen_line_ip}
+    server_name _;
+
+    ssl_certificate     ${ip_tls_fc};
+    ssl_certificate_key ${ip_tls_key};
+    server_tokens off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+${hub_block}
+${bh_block}
+${proxy_block}
+    location = ${ctrl_path} {
+        if (\$http_upgrade != "websocket") { return 404; }
+        proxy_pass http://127.0.0.1:${ctrl};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+    location = / {
+        proxy_pass http://127.0.0.1:\$root_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:\$backend_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_connect_timeout 3s;
+        proxy_intercept_errors on;
+        error_page 502 503 504 =200 /;
+        proxy_next_upstream error timeout http_502 http_503;
+        proxy_next_upstream_tries 2;
+        proxy_socket_keepalive on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+IPTLS
+)"
+    fi
+    printf '%s\n' "$ip_tls_block"
+    cat <<NGINX
+server {
+    ${listen_line_primary}
+    server_name ${domain};
+
+    server_tokens off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+${hub_block}
+${bh_block}
+${proxy_block}
+    # rishh: tfkik sait fik az channel kontroli ba hdr Upgrade
+    location = ${ctrl_path} {
+        if (\$http_upgrade != "websocket") { return 404; }
+        proxy_pass http://127.0.0.1:${ctrl};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    location = / {
+        proxy_pass http://127.0.0.1:\$root_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # ditai nodeha va sabaskripshn br asas path
+    location / {
+        proxy_pass http://127.0.0.1:\$backend_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_connect_timeout 3s;
+        proxy_intercept_errors on;
+        error_page 502 503 504 =200 /;
+        proxy_next_upstream error timeout http_502 http_503;
+        proxy_next_upstream_tries 2;
+        proxy_socket_keepalive on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINX
+    # server-e HTTP-e sade (bedoon TLS) baraye halat-e tunnel-e plain — faghat agar plain_port set bashad.
+    # az haman maphaye bala (backend_port/root_backend) estefade mikonad; TLS-i dar kar nist.
+    local plain_port; plain_port="$(jq -r '.plain_port // empty' "$STATE" 2>/dev/null)"
+    if [ -n "$plain_port" ] && [ "$plain_port" != null ]; then
+      # agar direct_port == plain_port (merge), location / bayad be $direct_backend berad
+      # (header match -> node port; khali -> map2 fallback = $backend_port fall-through).
+      local plain_backend='$backend_port'
+      local dm_port; dm_port="$(jq -r '.direct_port // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$dm_port" ] && [ "$dm_port" != null ] && [ "$dm_port" = "$plain_port" ]; then
+        plain_backend='$direct_backend'
+      fi
+      cat <<NGINXP
+server {
+    listen ${plain_port};
+    listen [::]:${plain_port};
+    server_name _;
+
+    # rishh: sait fik (bedoon upgrade) ya channel kontroli rathole (ba websocket) — bedoon TLS
+    location = / {
+        proxy_pass http://127.0.0.1:\$root_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:${plain_backend};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_connect_timeout 3s;
+        proxy_next_upstream error timeout http_502 http_503;
+        proxy_next_upstream_tries 2;
+        proxy_socket_keepalive on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXP
+    fi
+    # server-e HTTP-e sade baraye halat direct-IP (header-routing) — faghat agar direct_port set bashad
+    # VA ba plain_port yeksan nabashad (dar soorat-e yeksani, block-e plain khodesh sherkat mikonad — Task 3).
+    local d_port d_plain
+    d_port="$(jq -r '.direct_port // empty' "$STATE" 2>/dev/null)"
+    d_plain="$(jq -r '.plain_port // empty' "$STATE" 2>/dev/null)"
+    if [ -n "$d_port" ] && [ "$d_port" != null ] && [ "$d_port" != "$d_plain" ]; then
+      cat <<NGINXD
+server {
+    listen ${d_port};
+    listen [::]:${d_port};
+    server_name _;
+
+    # header matched -> port-e node; vagarna -> fallback (map 2)
+    location / {
+        proxy_pass http://127.0.0.1:\$direct_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXD
+    fi
+    # server blockhaye damnhhaye ezafi (chand damnh hamzaman rooye hamin server Iran)
+
+    jq -r '(.extra_domains // [])[] | [.domain,.fullchain,.key] | @tsv' "$STATE" 2>/dev/null |
+    while IFS=$'\t' read -r ed efc ekey; do
+      [ -n "$ed" ] || continue
+      [ -n "$efc" ] || efc="/etc/letsencrypt/live/${ed}/fullchain.pem"
+      [ -n "$ekey" ] || ekey="/etc/letsencrypt/live/${ed}/privkey.pem"
+      if [ ! -f "$efc" ] || [ ! -f "$ekey" ]; then warn "gvahi damnh ezafi $ed nist ($efc); rad shod."; continue; fi
+      cat <<NGINX2
+server {
+    ${listen_line_extra}
+    server_name ${ed};
+
+    ssl_certificate     ${efc};
+    ssl_certificate_key ${ekey};
+    server_tokens off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+${hub_block}
+${bh_block}
+${proxy_block}
+    location = ${ctrl_path} {
+        if (\$http_upgrade != "websocket") { return 404; }
+        proxy_pass http://127.0.0.1:${ctrl};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+    location = / {
+        proxy_pass http://127.0.0.1:\$root_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:\$backend_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        tcp_nodelay on;
+        proxy_connect_timeout 3s;
+        proxy_intercept_errors on;
+        error_page 502 503 504 =200 /;
+        proxy_next_upstream error timeout http_502 http_503;
+        proxy_next_upstream_tries 2;
+        proxy_socket_keepalive on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINX2
+    done
+  } > "$NGINX_CONF.tmp"
+
+  # masir khorooji az state (baraye riplis mstghim file fali nginx)
+  local out; out="$(jq -r '.nginx_conf // empty' "$STATE" 2>/dev/null)"
+  [ -n "$out" ] || out="$NGINX_CONF"
+  # backup ikbarh az file mojood ghabl az riplis
+  if [ -f "$out" ] && [ ! -f "$out.rathole-orig.bak" ]; then
+    cp -a "$out" "$out.rathole-orig.bak"
+    warn "backup az config ghabli: $out.rathole-orig.bak"
+  fi
+  [ -f "$out" ] && cp -a "$out" "$out.rathole-last.bak"
+  mv "$NGINX_CONF.tmp" "$out"
+  # halat SNI/game: agar service game (sni) darim, stream rooye 443 va http rooye port dakhli
+  if [ "$sni_count" -gt 0 ]; then
+    ensure_stream_include
+    gen_stream_conf "$internal"
+  else
+    rm -f "$STREAM_CONF" 2>/dev/null
+  fi
+}
+
+# tvlid config stream (SNI → node passthrough; default → http dakhli)
+gen_stream_conf(){
+  local internal="$1"
+  mkdir -p "$(dirname "$STREAM_CONF")"
+  {
+    echo "# tvlid khodkar tvst ratholectl — stream/SNI (servicehaye game)"
+    echo "map \$ssl_preread_server_name \$rh_stream_backend {"
+    echo "    default   127.0.0.1:${internal};"
+    jq -r '.nodes[] | select(.sni != null) | [.sni,(.port|tostring)] | @tsv' "$STATE" |
+    while IFS=$'\t' read -r sni p; do
+      p="${p%$'\r'}"   # jq-e Windows CRLF mideh; \r bayad ghabl az neveshtan-e config strip shavad
+      printf '    %-28s 127.0.0.1:%s;\n' "$sni" "$p"
+    done
+    echo "}"
+    echo "server {"
+    echo "    listen 443;"
+    echo "    ssl_preread on;"
+    echo "    proxy_pass \$rh_stream_backend;"
+    echo "    proxy_timeout 1h;"
+    echo "    proxy_connect_timeout 3s;"
+    echo "    tcp_nodelay on;"
+    echo "    proxy_socket_keepalive on;"
+    echo "}"
+  } > "$STREAM_CONF"
+}
+
+# ---------- regenerate + reload ----------
+regenerate(){
+  need_root
+  # snapshot-e known-good az DO file (http + stream) GHABL az tvlid, ta agar nginx -t
+  # shekast khord betavanim har DO ra bargardanim (na faghat http).
+  local out; out="$(jq -r '.nginx_conf // empty' "$STATE" 2>/dev/null)"; [ -n "$out" ] || out="$NGINX_CONF"
+  local pre_http_bak="" pre_stream_bak=""
+  if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+    # config-e fali salem ast → az an snapshot begir (baraye rollback-e in regen)
+    [ -f "$out" ] && { pre_http_bak="$(rth_mktemp)"; cp -a "$out" "$pre_http_bak"; }
+    [ -f "$STREAM_CONF" ] && { pre_stream_bak="$(rth_mktemp)"; cp -a "$STREAM_CONF" "$pre_stream_bak"; }
+  fi
+  gen_server_toml
+  gen_nginx_conf
+  log "configha tvlid shdnd ($SERVER_TOML , $out)."
+  if command -v nginx >/dev/null 2>&1; then
+    if nginx -t 2>/tmp/nginx_test.log; then
+      systemctl reload nginx || systemctl restart nginx
+      log "nginx reload shod."
+      cp -a "$out" "$out.rathole-good.bak" 2>/dev/null || true
+      [ -f "$STREAM_CONF" ] && cp -a "$STREAM_CONF" "$STREAM_CONF.rathole-good.bak" 2>/dev/null || true
+      # agar stream hazf shode (bedoon SNI), backup-e bayat ra ham pak kon
+      [ -f "$STREAM_CONF" ] || rm -f "$STREAM_CONF.rathole-good.bak" 2>/dev/null
+    else
+      err "nginx -t khata dad; reload nashod:"; cat /tmp/nginx_test.log >&2
+      # rollback-e har DO file (http + stream) be akharin halat-e known-good
+      local restored=0
+      if [ -n "$pre_http_bak" ] && [ -f "$pre_http_bak" ]; then cp -a "$pre_http_bak" "$out"; restored=1
+      elif [ -f "$out.rathole-good.bak" ]; then cp -a "$out.rathole-good.bak" "$out"; restored=1; fi
+      if [ -n "$pre_stream_bak" ] && [ -f "$pre_stream_bak" ]; then cp -a "$pre_stream_bak" "$STREAM_CONF"; restored=1
+      elif [ -f "$STREAM_CONF.rathole-good.bak" ]; then cp -a "$STREAM_CONF.rathole-good.bak" "$STREAM_CONF"; restored=1
+      else
+        # stream-e known-good vojood nadasht (masalan awalin regen ba SNI-ye kharab) → file-e kharab ra bardar
+        [ -f "$STREAM_CONF" ] && { rm -f "$STREAM_CONF"; restored=1; }
+      fi
+      if [ "$restored" -eq 1 ]; then
+        err "config ghabli bazgardande shod (nginx salem mimanad)."
+        nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || true; }
+      else
+        err "hich config-e known-good baraye bazgardandan nabood; nginx dast-nakhorde mimanad."
+      fi
+    fi
+  fi
+  rm -f "$pre_http_bak" "$pre_stream_bak" 2>/dev/null || true
+  if systemctl is-active --quiet "$RATHOLE_SVC"; then
+    log "server.toml berooz shd; rathole khodesh hot-reload mikonad (tunnelhaye faal ghat nmishvnd)."
+  else
+    systemctl start "$RATHOLE_SVC" 2>/dev/null && log "$RATHOLE_SVC start shod." || \
+      err "ntvanstm $RATHOLE_SVC ra start knm (shaid hnvz enable nashode)."
+  fi
+  # instans-e noise (agar roshan bashad): noise-server.toml ra besaz va service ra restart kon.
+  local nport; nport="$(jq -r '.noise_port // empty' "$STATE" 2>/dev/null)"
+  if [ -n "$nport" ] && [ "$nport" != null ]; then
+    # unit ra motmaen shv vojood darad — baad-e restore-e panel roo server-e taze
+    # mumken ast noise dar state bashad ama unit-e systemd sakhte nashode bashad.
+    ensure_noise_unit
+    gen_noise_server_toml
+    log "noise-server.toml berooz shd ($NOISE_TOML)."
+    systemctl enable "$NOISE_SVC" >/dev/null 2>&1 || true
+    if systemctl list-unit-files 2>/dev/null | grep -q "^${NOISE_SVC}.service"; then
+      # taghir-e list-e service-ha → restart amn-tar az reload (config_watcher list-e service ra dubare mikhanad ama restart motmaen-tar).
+      systemctl restart "$NOISE_SVC" 2>/dev/null && log "$NOISE_SVC restart shod." || \
+        err "ntvanstm $NOISE_SVC ra restart knm."
+    fi
+  fi
+  # instans-e backhaul (agar roshan bashad): toml ra besaz va service ra restart kon (mesl noise).
+  local bhp; bhp="$(jq -r '.backhaul_port // empty' "$STATE" 2>/dev/null)"
+  if [ -n "$bhp" ] && [ "$bhp" != null ]; then
+    ensure_backhaul_unit
+    gen_backhaul_server_toml
+    systemctl enable "$BH_SVC" >/dev/null 2>&1 || true
+    if systemctl list-unit-files 2>/dev/null | grep -q "^${BH_SVC}.service"; then
+      systemctl restart "$BH_SVC" 2>/dev/null && log "$BH_SVC restart shod." || \
+        err "ntvanstm $BH_SVC ra restart knm."
+    fi
+  fi
+}
+
+# ---------- chap dstvr nasb node ----------
+print_node_install(){
+  need_bin jq; ensure_state
+  local name="$1" domain ctrl node token inbound aib at
+  local gh="${RATHOLE_GH:-loopy-iri/RatholeEngine}" ref="${RATHOLE_REF:-main}"
+  domain="$(s_get '.domain')"
+  node="$(jq -c --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE")"
+  [ -n "$node" ] || die "node '$name' peyda nashod."
+  token="$(echo "$node" | jq -r '.token')"
+  inbound="$(echo "$node" | jq -r '.inbound_port')"
+  # agar domain khali bood (halat IP-tunnel), IP-e omomi ya placeholder ra bezar
+  local server_addr="${domain}"
+  [ -n "$server_addr" ] || server_addr="$(detect_ip 2>/dev/null)"
+  [ -n "$server_addr" ] || server_addr='<IRAN-IP-YA-DOMAIN>'
+  aib="$(echo "$node" | jq -r '.api_inbound_port // empty')"
+  [ -n "$aib" ] && at="$(echo "$node" | jq -r '.api_token')"
+
+  echo
+  echo "$(c_y '──────── dstvr nasb rooye node kharej (curl yek-khatti) ────────')"
+  printf 'curl -fsSL https://raw.githubusercontent.com/%s/%s/install.sh | sudo bash -s -- --node -- \\\n' "$gh" "$ref"
+  printf '  --server %s:443 --name %s --token %s --inbound-port %s' "$server_addr" "$name" "$token" "$inbound"
+  if [ -n "$aib" ]; then
+    printf ' \\\n  --api-token %s --api-inbound-port %s' "$at" "$aib"
+  fi
+  echo
+  echo "$(c_y '──────── ya ba baste-ye mahalli (install-node.sh) ────────')"
+  printf 'sudo bash install-node.sh --server %s:443 --name %s \\\n' "$server_addr" "$name"
+  printf '     --token %s --inbound-port %s' "$token" "$inbound"
+  if [ -n "$aib" ]; then
+    printf ' \\\n     --api-token %s --api-inbound-port %s' "$at" "$aib"
+    echo
+    local alp; alp="$(echo "$node" | jq -r '.api_local_port')"
+    echo "$(c_y "dar panel: adres node ra 127.0.0.1 va port API ra ${alp} bgzar.")"
+  else
+    echo
+  fi
+  echo "$(c_y '────────────────────────────────────────')"
+  echo "rooye node yek inbound VLESS+WS bsaz: path=/$name , listen=127.0.0.1 , port=$inbound , TLS=off"
+}
+
+# ---------- abzarhaye taghir dar tvl zman ----------
+state_set(){ # $1=jqpath $2=value $3=type(str|num)
+  # BEHRANI: ghablan khorooji-e jq check nemishod va `mv` BI-GHARAR anjam mishod — pas har
+  # shekast-e jq (state-e kharab, jq-path-e ghalat, disk-e por) state.json ra ba yek file-e
+  # KHALI jaygozin mikard va HAMEYE node/token/port az beyn miraft. chon script ba `set -uo
+  # pipefail` (bedoon -e) ejra mishavad, khatta-ye jq khod-be-khod motevaghef nemikard.
+  local tmp; tmp="$(rth_mktemp)" || die "sakht-e file-e movaghat nashod."
+  if [ "${3:-str}" = num ]; then
+    echo "$2" | grep -qE '^[0-9]+$' || die "meghdar bayad adad bashad: $2"
+    jq "$1 = ($2)" "$STATE" > "$tmp" || die "jq shekast khord؛ state dast-nakhorde mand."
+  else
+    jq --arg v "$2" "$1 = \$v" "$STATE" > "$tmp" || die "jq shekast khord؛ state dast-nakhorde mand."
+  fi
+  # file-e khali ya nim-kare HARGEZ nabayad jaygozin-e state shavad.
+  [ -s "$tmp" ] || die "khorooji-e jq khali bood؛ state dast-nakhorde mand."
+  mv "$tmp" "$STATE"
+}
+
+# taghir tanzimat srasri: ratholectl set <key> <value>
+cmd_set(){
+  need_root; need_bin jq; ensure_state
+  local key="${1:-}" val="${2:-}"
+  [ -n "$key" ] && [ -n "$val" ] || die "estefade: ratholectl set <domain|fullchain|key|nginx-conf|fake-port|sub-port|control-port|sub-path|hub-path> <value>"
+  case "$key" in
+    domain)        state_set '.domain' "$val" str ;;
+    fullchain)     state_set '.cert_fullchain' "$val" str ;;
+    key)           state_set '.cert_key' "$val" str ;;
+    nginx-conf)    state_set '.nginx_conf' "$val" str ;;
+    fake-port)     state_set '.fake_port' "$val" num ;;
+    sub-port)      state_set '.sub_port' "$val" num ;;
+    control-port)  state_set '.control_port' "$val" num ;;
+    control-path) state_set '.control_path' "$val" str ;;
+    sub-path)      state_set '.sub_path' "$(normalize_path_seg "$val")" str ;;
+    hub-path)      state_set '.hub_path' "$(normalize_path_seg "$val")" str ;;
+    *) die "kelid nashenakhte: $key" ;;
+  esac
+  log "tanzim shod: $key = $val"
+  regenerate
+}
+
+# virayesh yek node: ratholectl edit <name> [--inbound N] [--api-port N|off]
+cmd_edit(){
+  need_root; need_bin jq; ensure_state
+  local name="${1:-}"; shift || true
+  [ -n "$name" ] || die "estefade: ratholectl edit <name> [--inbound N] [--api-port N|off]"
+  jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
+  local inbound="" api="" tmp
+  while [ $# -gt 0 ]; do case "$1" in
+    --inbound)  inbound="$2"; shift 2;;
+    --api-port) api="$2"; shift 2;;
+    *) shift;;
+  esac; done
+
+  if [ -n "$inbound" ]; then
+    echo "$inbound" | grep -qE '^[0-9]+$' || die "inbound bayad adad bashad."
+    tmp="$(mktemp)"; jq --arg n "$name" --argjson ib "$inbound" \
+      '(.nodes[] | select(.name==$n) | .inbound_port) |= $ib' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+    log "inbound node '$name' → $inbound"
+  fi
+
+  if [ -n "$api" ]; then
+    if [ "$api" = off ]; then
+      tmp="$(mktemp)"; jq --arg n "$name" \
+        '(.nodes[] | select(.name==$n)) |= del(.api_local_port, .api_inbound_port, .api_token)' \
+        "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      log "channel mdirit node '$name' khamoosh shod."
+    else
+      echo "$api" | grep -qE '^[0-9]+$' || die "port api bayad adad bashad."
+      local has_ap aport atoken astart
+      has_ap="$(jq -r --arg n "$name" '.nodes[]|select(.name==$n)|.api_local_port // empty' "$STATE")"
+      if [ -z "$has_ap" ]; then
+        astart="$(s_get '.api_port_start')"; aport="$(next_port api_local_port "$astart")"; atoken="$(gen_token)"
+        tmp="$(mktemp)"; jq --arg n "$name" --argjson ap "$aport" --argjson aib "$api" --arg at "$atoken" \
+          '(.nodes[]|select(.name==$n)) |= (. + {api_local_port:$ap, api_inbound_port:$aib, api_token:$at})' \
+          "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+        log "channel mdirit roshan shod (lvkal $aport)."
+      else
+        tmp="$(mktemp)"; jq --arg n "$name" --argjson aib "$api" \
+          '(.nodes[]|select(.name==$n)|.api_inbound_port) |= $aib' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+        log "port inbound mdirit node '$name' → $api"
+      fi
+    fi
+  fi
+  regenerate
+  print_node_install "$name"
+}
+
+# taghir name/masir node: ratholectl rename <old> <new>
+cmd_rename(){
+  need_root; need_bin jq; ensure_state
+  local old="${1:-}" new="${2:-}"
+  [ -n "$old" ] && [ -n "$new" ] || die "estefade: ratholectl rename <old> <new>"
+  echo "$new" | grep -qE '^[a-zA-Z0-9_-]+$' || die "name jadid namotabar ast."
+  is_reserved_name "$new" && die "name '$new' rezerv shode; name-e digari entekhab kon."
+  jq -e --arg n "$old" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$old' peyda nashod."
+  jq -e --arg n "$new" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null && die "name '$new' ghblaan vojood darad."
+  local is_game; is_game="$(jq -r --arg n "$old" '.nodes[]|select(.name==$n)|.sni // empty' "$STATE")"
+  local tmp; tmp="$(mktemp)"
+  jq --arg o "$old" --arg n "$new" '(.nodes[]|select(.name==$o)|.name) |= $n' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  warn "masir karbar az /$old be /$new taghir krd; config karbaran va path inbound Xray node ra ham beroozresani kon."
+  # MOHEM: rathole service ra ba NAME juft mikonad. node hanooz service-e '$old' ra darad,
+  # pas tunnel ta zamani ke rooye node service ra rename nakoni ghat mimanad.
+  warn "rooye node service ra ham rename kon (token sabet mimanad): 'ratholenode rm-svc $old' sps 'ratholenode add-svc $new <token> <inbound>' (ya baraye upstream, moadel-e upstream)."
+  regenerate
+  # dstvr-e nasb-e dorost bar asas-e no-e node (game=TLS/Vision , adi=WS)
+  if [ -n "$is_game" ]; then print_game_install "$new"; else print_node_install "$new"; fi
+}
+
+# chrkhsh tokenha: ratholectl rotate <name>
+cmd_rotate(){
+  need_root; need_bin jq; ensure_state
+  local name="${1:-}"
+  [ -n "$name" ] || die "estefade: ratholectl rotate <name>"
+  jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
+  local tmp newt; tmp="$(mktemp)"; newt="$(gen_token)"
+  jq --arg n "$name" --arg t "$newt" '(.nodes[]|select(.name==$n)|.token) |= $t' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  # agar channel mdirit dard, token an ham chrkhandh shavad
+  if jq -e --arg n "$name" '.nodes[]|select(.name==$n)|.api_token' "$STATE" >/dev/null; then
+    tmp="$(mktemp)"; jq --arg n "$name" --arg t "$(gen_token)" \
+      '(.nodes[]|select(.name==$n)|.api_token) |= $t' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  fi
+  log "token node '$name' chrkhandh shod. rooye node bayad ba token jadid dvbarh nasb/beroozresani shavad."
+  regenerate
+  print_node_install "$name"
+}
+
+# namayesh jzyiat yek node
+cmd_show(){ ensure_state; print_node_install "${1:-}"; }
+
+# ---------- L4 tst (stream+SNI) mvazi rooye port jda ----------
+ensure_stream_include(){
+  local nc=/etc/nginx/nginx.conf
+  if command -v dpkg >/dev/null 2>&1 && ! dpkg -s libnginx-mod-stream >/dev/null 2>&1; then
+    apt-get update -qq 2>/dev/null && apt-get install -y -qq libnginx-mod-stream 2>/dev/null || true
+  fi
+  grep -qE 'include[[:space:]]+/etc/nginx/stream\.d/\*\.conf' "$nc" && { mkdir -p /etc/nginx/stream.d; return 0; }
+  if grep -qE '^[[:space:]]*stream[[:space:]]*\{' "$nc"; then
+    warn "blak stream az ghabl dar nginx.conf hst. in kht ra dasti dakhlsh bgzar:"
+    warn "    include /etc/nginx/stream.d/*.conf;"
+    mkdir -p /etc/nginx/stream.d
+    return 0
+  fi
+  cp -a "$nc" "$nc.l4.bak"
+  mkdir -p /etc/nginx/stream.d
+  printf '\nstream {\n    include /etc/nginx/stream.d/*.conf;\n}\n' >> "$nc"
+  log "blak stream be nginx.conf ezafe shod (backup: $nc.l4.bak)."
+}
+
+# ratholectl game add <name> <node_tls_inbound_port> <sni>
+cmd_game(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    add)  cmd_game_add "$@" ;;
+    rm)   cmd_game_rm "${1:-}" ;;
+    ls)   cmd_game_ls ;;
+    cert) cmd_game_cert "${1:-}" ;;
+    show) print_game_install "${1:-}" ;;
+    *) die "estefade: ratholectl game <add|rm|ls|cert|show> ..." ;;
+  esac
+}
+
+cmd_game_add(){
+  local name="${1:-}" inbound="${2:-}" sni="${3:-}"
+  [ -n "$name" ] && [ -n "$inbound" ] && [ -n "$sni" ] || die "estefade: ratholectl game add <name> <node_tls_inbound_port> <sni>"
+  echo "$name" | grep -qE '^[a-zA-Z0-9_-]+$' || die "name namotabar."
+  is_reserved_name "$name" && die "name '$name' rezerv shode; name-e digari entekhab kon."
+  echo "$inbound" | grep -qE '^[0-9]+$' || die "inbound bayad adad bashad."
+  # sni mostaghim daroon-e config-e nginx stream neveshte mishavad (gen_stream_conf);
+  # hatman ba regex-e hostname mahdood shavad (ejaze-ye '*.' baraye wildcard) ta tzrigh nashavad.
+  echo "$sni" | grep -qE '^(\*\.)?[A-Za-z0-9_.-]+$' || die "sni namotabar (faghat harf/adad/nghth/khttirh, ya '*.' baraye wildcard)."
+  jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null && die "node '$name' vojood darad."
+  local dstart dport token node_json
+  dstart="$(s_get '.data_port_start')"; dport="$(next_port port "$dstart")"; token="$(gen_token)"
+  node_json="$(jq -n --arg n "$name" --argjson p "$dport" --argjson ib "$inbound" --arg t "$token" --arg s "$sni" \
+     '{name:$n, port:$p, inbound_port:$ib, token:$t, sni:$s}')"
+  jq --argjson node "$node_json" '.nodes += [$node]' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+  log "service game '$name' ezafe shod (SNI=$sni → data 127.0.0.1:$dport , node inbound :$inbound)."
+  warn "443 hala stream/SNI shd; L7 fali rooye port dakhli mntghl shod (karbaran path dstnkhvrdh)."
+  regenerate
+  print_game_install "$name"
+}
+
+cmd_game_rm(){
+  local name="${1:-}"
+  [ -n "$name" ] || die "estefade: ratholectl game rm <name>"
+  jq -e --arg n "$name" '.nodes[]|select(.name==$n and .sni!=null)' "$STATE" >/dev/null || die "service game '$name' peyda nashod."
+  jq --arg n "$name" '.nodes |= map(select(.name!=$n))' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+  log "service game '$name' hazf shod."
+  regenerate
+}
+
+cmd_game_ls(){
+  need_bin jq; ensure_state
+  printf '%-14s %-22s %-8s %s\n' "NAME" "SNI" "DATA" "NODE-INBOUND"
+  printf '%s\n' "------------------------------------------------------------"
+  jq -r '.nodes[] | select(.sni!=null) | [.name,.sni,(.port|tostring),(.inbound_port|tostring)] | @tsv' "$STATE" |
+  while IFS=$'\t' read -r n s p ib; do printf '%-14s %-22s %-8s %s\n' "$n" "$s" "$p" "$ib"; done
+}
+
+print_game_install(){
+  need_bin jq; ensure_state
+  local name="$1" node sni token inbound
+  node="$(jq -c --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE")"
+  [ -n "$node" ] || die "node '$name' peyda nashod."
+  sni="$(echo "$node" | jq -r '.sni')"; token="$(echo "$node" | jq -r '.token')"; inbound="$(echo "$node" | jq -r '.inbound_port')"
+  echo
+  echo "$(c_y '──────── rahandazi service game rooye node ────────')"
+  echo "1) gvahi $sni ra rooye node gharar bdh:  ratholectl game cert $sni   (mohtava/dstvr antghal midahad)"
+  echo "2) service tunnel ra be haman tunnel ezafe kon:"
+  echo "     ratholenode add-svc $name $token $inbound"
+  echo "3) web fik sabok baraye fallback:  ratholenode fakeweb start 8081"
+  echo "4) inbound Xray node = VLESS+TLS+Vision ba gvahi $sni :"
+  echo "     listen=127.0.0.1  port=$inbound  cert=/etc/xray-certs/$sni/{fullchain,privkey}.pem  fallback→8081"
+  local d; d="$(s_get '.domain' 2>/dev/null)"; [ -n "$d" ] && [ "$d" != null ] || d="<IRAN_IP>"
+  echo "klaint: VLESS  address=${d}  port=443  SNI=${sni}  security=tls  flow=xtls-rprx-vision  fp=chrome"
+  echo "$(c_y '────────────────────────────────────────────')"
+}
+
+# grftn gvahi baraye SNI rooye in server va amade-sazi antghal be node
+cmd_game_cert(){
+  need_root
+  local sni="${1:-}"
+  [ -n "$sni" ] || die "estefade: ratholectl game cert <sni>"
+  command -v certbot >/dev/null 2>&1 || die "certbot nasb nist."
+  warn "niaz: DNS $sni be hamin server asharh konad va port 80 azad bashad."
+  local email; rth_read email "aimil Let's Encrypt (khali=bedoon aimil): "
+  local was_active=0
+  systemctl is-active --quiet nginx && { was_active=1; systemctl stop nginx; }
+  local args=(certonly --standalone --non-interactive --agree-tos -d "$sni")
+  if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
+  local cbt="${RATHOLE_CERTBOT_TIMEOUT:-300}" cb=(certbot)
+  command -v timeout >/dev/null 2>&1 && cb=(timeout "$cbt" certbot)
+  local ok=0
+  if "${cb[@]}" "${args[@]}"; then
+    ok=1
+  fi
+  [ "$was_active" -eq 1 ] && systemctl start nginx || true
+  if [ "$ok" -eq 1 ]; then
+    local d="/etc/letsencrypt/live/$sni"
+    log "gvahi grfth shod: $d"
+    echo
+    echo "$(c_y '── antghal be node (fght scp amn; hrgz kelid khsvsi ra namayesh ndh) ──')"
+    echo "  ssh root@<NODE_IP> 'mkdir -p /etc/xray-certs/$sni'"
+    echo "  scp $d/fullchain.pem $d/privkey.pem root@<NODE_IP>:/etc/xray-certs/$sni/"
+    echo
+    warn "kelid khsvsi dar trminal chap nemishavad (amnit). az scp bala estefade kon."
+    warn "baad az antghal, renew ra ba hook tanzim kon ta dvbarh be node copy shavad."
+  else
+    err "grftn gvahi shekast khord (DNS? port 80?)."
+  fi
+}
+
+# ---------- namayesh damnh/gvahi (read-only, ghabl parse baraye panel) ----------
+cmd_info(){
+  need_bin jq; ensure_state
+  local domain fc key nconf exp="-" exists="no"
+  domain="$(s_get '.domain')"; fc="$(s_get '.cert_fullchain')"
+  key="$(s_get '.cert_key')";  nconf="$(s_get '.nginx_conf')"
+  if [ -f "$fc" ]; then
+    exists="yes"
+    if command -v openssl >/dev/null 2>&1; then
+      exp="$(openssl x509 -enddate -noout -in "$fc" 2>/dev/null | cut -d= -f2)"
+      [ -n "$exp" ] || exp="?"
+    fi
+  fi
+  echo "domain: $domain"
+  echo "fullchain: $fc"
+  echo "key: $key"
+  echo "nginx_conf: $nconf"
+  echo "cert_exists: $exists"
+  echo "cert_expiry: $exp"
+  # damnhhai SNI (game) niz ke rooye hamin 443 stream mishavand
+  jq -r '.nodes[] | select(.sni!=null) | "sni: \(.sni)"' "$STATE" 2>/dev/null || true
+}
+
+# ---------- list hameye gvahiha (letsencrypt + gvahi asli + extra + SNI) baraye panel ----------
+cmd_certs(){
+  need_bin jq; ensure_state
+  local active mfc le=/etc/letsencrypt/live
+  active="$(s_get '.domain')"; mfc="$(s_get '.cert_fullchain')"
+  _exp(){ local f="$1" e="-"; command -v openssl >/dev/null 2>&1 && e="$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | cut -d= -f2)"; echo "${e:-?}"; }
+  echo "DOMAIN|EXPIRY|ACTIVE|SNI"
+  local seen_active=0 d dom fc is_active is_sni
+  if [ -d "$le" ]; then
+    for d in "$le"/*/; do
+      [ -d "$d" ] || continue
+      dom="$(basename "$d")"; [ "$dom" = "README" ] && continue
+      fc="$d/fullchain.pem"; [ -f "$fc" ] || continue
+      if [ "$dom" = "$active" ]; then is_active=yes; seen_active=1
+      elif jq -e --arg x "$dom" '(.extra_domains // [])[]|select(.domain==$x)' "$STATE" >/dev/null 2>&1; then is_active=yes
+      else is_active=no; fi
+      if jq -e --arg sn "$dom" '.nodes[]|select(.sni==$sn)' "$STATE" >/dev/null 2>&1; then is_sni=yes; else is_sni=no; fi
+      echo "${dom}|$(_exp "$fc")|${is_active}|${is_sni}"
+    done
+  fi
+  if [ "$seen_active" -eq 0 ] && [ -n "$active" ] && [ "$active" != null ] && [ -f "$mfc" ]; then
+    echo "${active}|$(_exp "$mfc")|yes|no"
+  fi
+}
+
+# ---------- namayesh masir-e hameye config-ha (ba alamat-e vojood/adam) ----------
+# estefade: ratholectl paths
+cmd_paths(){
+  need_bin jq; ensure_state
+  local nconf; nconf="$(s_get '.nginx_conf')"; case "$nconf" in ''|null) nconf="$NGINX_CONF" ;; esac
+  local fc key; fc="$(s_get '.cert_fullchain')"; key="$(s_get '.cert_key')"
+  local ok no; ok="$(c_g '✓')"; no="$(c_r '✗')"
+  _row(){ local label="$1" p="$2" m; [ -f "$p" ] && m="$ok" || m="$no"; printf '  %s  %-22s %s\n' "$m" "$label" "$p"; }
+  echo "$(c_y '──────── masir-e config-ha va file-ha ────────')"
+  _row "state.json"        "$STATE"
+  _row "server.toml"       "$SERVER_TOML"
+  _row "nginx rathole.conf" "$nconf"
+  _row "nginx upgrade-map"  "/etc/nginx/conf.d/rathole-upgrade-map.conf"
+  # noise/stream faghat agar roshan bashand
+  [ -f "$NOISE_TOML" ]  && _row "noise-server.toml" "$NOISE_TOML"
+  [ -f "$STREAM_CONF" ] && _row "nginx stream (SNI)" "$STREAM_CONF"
+  _row "cert fullchain"    "$fc"
+  _row "cert privkey"      "$key"
+  _row "systemd server"    "/etc/systemd/system/rathole-server.service"
+  [ -f "/etc/systemd/system/${NOISE_SVC}.service" ] && _row "systemd noise" "/etc/systemd/system/${NOISE_SVC}.service"
+  _row "rathole binary"    "/usr/local/bin/rathole"
+  _row "ratholectl"        "/usr/local/bin/ratholectl"
+  _row "common.sh"         "/usr/local/share/rathole/common.sh"
+  echo "$(c_y '─────────────────────────────────────────────')"
+}
+
+# ---------- dashboard-e kamel-e vaziat (mesl-e panel-e VPN: hameye port-ha/halat-ha/service-ha/node-ha) ----------
+# estefade: ratholectl status [--json]
+cmd_status(){
+  need_bin jq; ensure_state
+  local as_json=0; [ "${1:-}" = "--json" ] && as_json=1
+
+  # ---- khvandan-e state ----
+  local domain ctrl fake sub internal plain_port direct_port direct_header hub_port noise_port bh_port cert_fc cert_key sni_count node_count ip_tls_ip ip_tls_fc
+  domain="$(s_get '.domain')"
+  ctrl="$(jq -r '.control_port // 2333' "$STATE")"
+  fake="$(jq -r '.fake_port // 8080' "$STATE")"
+  sub="$(jq -r '.sub_port // 2096' "$STATE")"
+  internal="$(jq -r '.internal_port // 8443' "$STATE")"
+  plain_port="$(jq -r '.plain_port // empty' "$STATE")"
+  direct_port="$(jq -r '.direct_port // empty' "$STATE")"
+  direct_header="$(jq -r '.direct_header // "X-Cdn-Id"' "$STATE")"
+  hub_port="$(jq -r '.hub_port // empty' "$STATE")"
+  noise_port="$(jq -r '.noise_port // empty' "$STATE")"
+  bh_port="$(jq -r '.backhaul_port // empty' "$STATE")"
+  cert_fc="$(s_get '.cert_fullchain')"; cert_key="$(s_get '.cert_key')"
+  ip_tls_ip="$(jq -r '.ip_tls.ip // empty' "$STATE" 2>/dev/null)"
+  ip_tls_fc="$(jq -r '.ip_tls.fullchain // empty' "$STATE" 2>/dev/null)"
+  sni_count="$(jq '[.nodes[]|select(.sni!=null)]|length' "$STATE" 2>/dev/null)"; sni_count="${sni_count:-0}"
+  node_count="$(jq '.nodes|length' "$STATE" 2>/dev/null)"; node_count="${node_count:-0}"
+
+  # ---- cert ----
+  local cert_ok="no" cert_exp="-" cert_selfsigned="no"
+  if [ -f "$cert_fc" ]; then
+    cert_ok="yes"
+    if command -v openssl >/dev/null 2>&1; then
+      cert_exp="$(openssl x509 -enddate -noout -in "$cert_fc" 2>/dev/null | cut -d= -f2)"; [ -n "$cert_exp" ] || cert_exp="?"
+      # self-signed: issuer == subject
+      local iss subj; iss="$(openssl x509 -issuer -noout -in "$cert_fc" 2>/dev/null)"; subj="$(openssl x509 -subject -noout -in "$cert_fc" 2>/dev/null)"
+      [ -n "$iss" ] && [ "${iss#issuer=}" = "${subj#subject=}" ] && cert_selfsigned="yes"
+    fi
+  fi
+
+  # ---- service-ha (active/inactive) ----
+  _svc_active(){ systemctl is-active --quiet "$1" 2>/dev/null && echo yes || echo no; }
+  local svc_server svc_noise svc_bh svc_nginx nginx_ok
+  svc_server="$(_svc_active rathole-server)"
+  svc_nginx="$(_svc_active nginx)"
+  [ -f "/etc/systemd/system/${NOISE_SVC}.service" ] && svc_noise="$(_svc_active "$NOISE_SVC")" || svc_noise="off"
+  [ -f "$BH_UNIT" ] && svc_bh="$(_svc_active "$BH_SVC")" || svc_bh="off"
+  nginx -t >/dev/null 2>&1 && nginx_ok="yes" || nginx_ok="no"
+
+  # ---- transport-e faal ----
+  local mode="websocket+TLS (443)"
+  [ "$sni_count" -gt 0 ] && mode="game/SNI (443 L4 → panel:$internal)"
+
+  local ip; ip="$(detect_ip)"
+
+  # ---------- khoruji-ye JSON (baraye hub) ----------
+  if [ "$as_json" -eq 1 ]; then
+    jq -n \
+      --arg domain "$domain" --arg ip "$ip" --arg mode "$mode" \
+      --argjson ctrl "${ctrl:-2333}" --argjson fake "${fake:-8080}" --argjson sub "${sub:-2096}" \
+      --argjson internal "${internal:-8443}" \
+      --arg plain "${plain_port:-}" --arg direct "${direct_port:-}" --arg dhdr "$direct_header" \
+      --arg hub "${hub_port:-}" --arg noise "${noise_port:-}" --arg backhaul "${bh_port:-}" \
+      --arg sub_path "$(sub_path_seg)" --arg hub_path "$(hub_path_seg)" \
+      --arg cert_fc "$cert_fc" --arg cert_key "$cert_key" --arg cert_ok "$cert_ok" \
+      --arg cert_exp "$cert_exp" --arg cert_ss "$cert_selfsigned" \
+      --arg ip_tls_ip "$ip_tls_ip" --arg ip_tls_fc "$ip_tls_fc" \
+      --arg svc_server "$svc_server" --arg svc_nginx "$svc_nginx" --arg svc_noise "$svc_noise" \
+      --arg svc_bh "$svc_bh" --arg nginx_ok "$nginx_ok" \
+      --arg bh_mode "$(jq -r '.backhaul_exposure // "nginx_tls"' "$STATE" 2>/dev/null)" \
+      --arg bh_transport "$(jq -r '.backhaul_transport // "wsmux"' "$STATE" 2>/dev/null)" \
+      --argjson sni_count "${sni_count:-0}" --argjson node_count "${node_count:-0}" \
+      --argjson nodes "$(jq '[.nodes[]|{name, port, inbound_port, api_local_port, sni, transport}]' "$STATE")" \
+      '{domain:$domain, public_ip:$ip, transport:$mode,
+        ports:{control:$ctrl, fake:$fake, sub:$sub, internal:$internal,
+               plain:(if $plain=="" then null else ($plain|tonumber) end),
+               direct:(if $direct=="" then null else ($direct|tonumber) end),
+               hub:(if $hub=="" then null else ($hub|tonumber) end),
+               noise:(if $noise=="" then null else ($noise|tonumber) end),
+               backhaul:(if $backhaul=="" then null else ($backhaul|tonumber) end)},
+        paths:{sub:$sub_path, hub:$hub_path},
+        direct_header:$dhdr,
+        cert:{fullchain:$cert_fc, key:$cert_key, exists:$cert_ok, expiry:$cert_exp, self_signed:$cert_ss},
+        ip_tls:{configured:($ip_tls_ip!=""),ip:(if $ip_tls_ip=="" then null else $ip_tls_ip end),fullchain:(if $ip_tls_fc=="" then null else $ip_tls_fc end),self_signed:($ip_tls_ip!="")},
+        services:{rathole_server:$svc_server, nginx:$svc_nginx, nginx_config_ok:$nginx_ok, noise:$svc_noise, backhaul:$svc_bh},
+        features:{plain:{configured:($plain!=""),active:($plain!="" and $svc_nginx=="yes"),port:(if $plain=="" then null else ($plain|tonumber) end)},
+                  direct:{configured:($direct!=""),active:($direct!="" and $svc_nginx=="yes"),port:(if $direct=="" then null else ($direct|tonumber) end)},
+                  noise:{configured:($noise!=""),active:($svc_noise=="yes"),port:(if $noise=="" then null else ($noise|tonumber) end),encrypted:true},
+                  backhaul:{configured:($backhaul!=""),active:($svc_bh=="yes"),port:(if $backhaul=="" then null else ($backhaul|tonumber) end),mode:$bh_mode,transport:$bh_transport,
+                            tls:($bh_mode=="nginx_tls" or ($bh_transport|test("^wss"))),
+                            encrypted:($bh_mode=="nginx_tls" or ($bh_transport|test("^wss"))),
+                            verified:($bh_mode=="nginx_tls")}},
+        sni_count:$sni_count, node_count:$node_count, nodes:$nodes}'
+    return
+  fi
+
+  # ---------- khoruji-ye adami (mesl-e panel-e sabaskripshn) ----------
+  local ok no on off; ok="$(c_g '●')"; no="$(c_r '●')"; on="$(c_g 'roshan')"; off="$(c_y 'khamoosh')"
+  _yn(){ [ "$1" = yes ] && echo "$ok" || echo "$no"; }
+  echo
+  echo "$(c_y '════════════ RATHOLE PANEL — STATUS ════════════')"
+  printf '  domain      : %s\n' "${domain:-<tanzim nashode>}"
+  printf '  public IP   : %s\n' "${ip:-?}"
+  printf '  transport   : %s\n' "$mode"
+  [ -n "$ip_tls_ip" ] && printf '  IP TLS      : %s (self-signed, trusted-root lazem)\n' "$ip_tls_ip"
+  echo
+  echo "$(c_y '──── service-ha ────')"
+  printf '  %s rathole-server\n'  "$(_yn "$svc_server")"
+  printf '  %s nginx  (config: %s)\n' "$(_yn "$svc_nginx")" "$([ "$nginx_ok" = yes ] && c_g 'salem' || c_r 'khata')"
+  [ "$svc_noise" != off ] && printf '  %s rathole-noise\n' "$(_yn "$svc_noise")"
+  [ "$svc_bh" != off ] && printf '  %s %s (core-e SMUX)\n' "$(_yn "$svc_bh")" "$BH_SVC"
+  echo
+  echo "$(c_y '──── port-ha ────')"
+  printf '  443       %s  vrvdi-ye asli (nginx TLS ya SNI)\n' "$([ "$svc_nginx" = yes ] && c_g '✓' || c_r '✗')"
+  printf '  %-9s     kontrol-e rathole (127.0.0.1)\n' "$ctrl"
+  printf '  %-9s     sait-e fik/panel (127.0.0.1)\n' "$fake"
+  printf '  %-9s     sabaskripshn (127.0.0.1, zir /%s/)\n' "$sub" "$(sub_path_seg)"
+  [ "$sni_count" -gt 0 ] && printf '  %-9s     panel-e dakheli (L7 posht-e SNI)\n' "$internal"
+  [ -n "$plain_port" ]  && printf '  %-9s     plain (websocket bedoon TLS)\n' "$plain_port"
+  [ -n "$direct_port" ] && printf '  %-9s     direct-IP (header: %s)\n' "$direct_port" "$direct_header"
+  [ -n "$hub_port" ]    && printf '  %-9s     hub (127.0.0.1, zir /%s/)\n' "$hub_port" "$(hub_path_seg)"
+  [ -n "$noise_port" ]  && printf '  %-9s     noise (TCP-e omomi, ramznegari-shode)\n' "$noise_port"
+  [ -n "$bh_port" ]     && printf '  %-9s     backhaul (127.0.0.1, SMUX az nginx/443)\n' "$bh_port"
+  echo
+  echo "$(c_y '──── gvahi (cert) ────')"
+  if [ "$cert_ok" = yes ]; then
+    printf '  %s mojood — enghza: %s%s\n' "$ok" "$cert_exp" "$([ "$cert_selfsigned" = yes ] && printf ' %s' "$(c_r '(self-signed! gvahi-ye vagheai begir)')" )"
+  else
+    printf '  %s peyda nashod: %s\n' "$no" "$cert_fc"
+    printf '     %s\n' "$(c_r 'nginx rooye 443/TLS bala nemiaiad. begir: ratholectl cert <domain>')"
+  fi
+  echo
+  echo "$(c_y "──── node-ha ($node_count) ────")"
+  if [ "$node_count" -eq 0 ]; then
+    printf '  (hich node-i ezafe nashode) — ezafe: ratholectl add <name> <inbound>\n'
+  else
+    printf '  %-14s %-8s %-10s %-9s %-6s %s\n' "NAME" "PORT" "INBOUND" "TRANSPORT" "SNI" "USER URL"
+    jq -r '.nodes[]|[.name,(.port|tostring),(.inbound_port|tostring),(.transport//"ws"),(.sni//"-")]|@tsv' "$STATE" |
+    while IFS=$'\t' read -r n p ib tr sn; do
+      local url; sn="${sn%$'\r'}"
+      if [ "$sn" != "-" ] && [ -n "$sn" ]; then url="SNI:$sn"; else url="https://${domain}/${n}"; fi
+      printf '  %-14s %-8s %-10s %-9s %-6s %s\n' "$n" "$p" "$ib" "$tr" "$sn" "$url"
+    done
+  fi
+  echo "$(c_y '════════════════════════════════════════════════')"
+}
+
+# ---------- grftn gvahi + tanzim damnh (ghir-taamoli, baraye panel) ----------
+# estefade: ratholectl cert <domain> [email]   (email khali = bedoon email sabt mishavad)
+cmd_ip_cert(){
+  need_root; need_bin jq; ensure_state
+  local ip="${1:-}" days="${2:-825}" dir fc key
+  echo "$ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || die "IP v4 namotabar ast. estefade: ratholectl ip-cert <IPv4> [days]"
+  command -v python3 >/dev/null 2>&1 || die "python3 lazem ast."
+  python3 - "$ip" <<'PY' || die "IP v4 namotabar ast."
+import ipaddress, sys
+ipaddress.IPv4Address(sys.argv[1])
+PY
+  echo "$days" | grep -qE '^[0-9]{1,5}$' || die "days bayad adad bashad."
+  [ "$days" -ge 1 ] && [ "$days" -le 3650 ] || die "days bayad bein 1 ta 3650 bashad."
+  command -v openssl >/dev/null 2>&1 || die "openssl lazem ast."
+  dir="/etc/rathole-manager/ip-tls/${ip}"
+  fc="$dir/fullchain.pem"; key="$dir/privkey.pem"
+  mkdir -p "$dir"; chmod 700 "$dir"
+  if [ ! -s "$fc" ] || [ ! -s "$key" ]; then
+    openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days "$days" \
+      -subj "/CN=$ip" -addext "subjectAltName=IP:$ip" -addext "keyUsage=digitalSignature,keyEncipherment" \
+      -addext "extendedKeyUsage=serverAuth" -keyout "$key" -out "$fc" >/dev/null 2>&1 \
+      || die "sakht-e gvahi self-signed shekast khord."
+    chmod 600 "$key"; chmod 644 "$fc"
+  fi
+  openssl x509 -in "$fc" -noout -checkip "$ip" >/dev/null 2>&1 || die "gvahi SAN-e IP=$ip nadarad."
+  # Bare-IP TLS SNI-e ghabel-eteka nadarad; cert-e IP bayad default_server bashad. agar
+  # config-e digari default-e 443 ast, faal-sazi ra rad kon ta nginx crash-loop nasazad.
+  local sni_count ext_default=0
+  sni_count="$(jq '[.nodes[]|select(.sni!=null)]|length' "$STATE" 2>/dev/null)"; sni_count="${sni_count:-0}"
+  if [ "$sni_count" -eq 0 ] && grep -rlsE 'listen[^;]*\bdefault_server\b' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null \
+       | grep -vxF "$NGINX_CONF" | grep -q .; then ext_default=1; fi
+  [ "$ext_default" -eq 0 ] || die "yek nginx default_server-e digar rooye 443 faal ast; aval tadakhol ra bartaraf kon."
+  local tmp; tmp="$(rth_mktemp)" || die "sakht-e file-e movaghat nashod."
+  jq --arg ip "$ip" --arg fc "$fc" --arg key "$key" \
+     '.ip_tls = {ip:$ip, fullchain:$fc, key:$key, self_signed:true}' "$STATE" > "$tmp" \
+     || die "zakhire IP TLS dar state shekast khord."
+  [ -s "$tmp" ] || die "state-e IP TLS khali shod; state dast-nakhorde mand."
+  mv "$tmp" "$STATE"
+  regenerate
+  log "WSS-e self-signed baraye IP=$ip faal shod; domain/cert-e asli dast-nakhorde mand."
+  echo "public_cert: $fc"
+  echo "private_key: $key (faghat rooye Iran; be node copy nakon)"
+}
+
+cmd_ip_cert_show(){
+  need_bin jq; ensure_state
+  local ip="${1:-}" fc
+  [ -n "$ip" ] || ip="$(jq -r '.ip_tls.ip // empty' "$STATE" 2>/dev/null)"
+  echo "$ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || die "IP v4 namotabar ast."
+  fc="/etc/rathole-manager/ip-tls/${ip}/fullchain.pem"
+  [ -f "$fc" ] || die "public cert peyda nashod; aval: ratholectl ip-cert $ip"
+  cat "$fc"
+}
+
+cmd_ip_cert_off(){
+  need_root; need_bin jq; ensure_state
+  jq -e '.ip_tls != null' "$STATE" >/dev/null 2>&1 || { warn "IP TLS az ghabl khamoosh ast."; return; }
+  # backhaul-e direct_ip ba wss/wssmux HAMIN gvahi ra be onvane tls_cert estefade mikonad —
+  # hazf-e an backhaul-server ra bi-seda az kar miandazad. jelo-ye tadakhol ra ghabl az taghir begir.
+  local _bx _btr
+  _bx="$(jq -r '.backhaul_exposure // empty' "$STATE" 2>/dev/null)"
+  _btr="$(jq -r '.backhaul_transport // empty' "$STATE" 2>/dev/null)"
+  if [ "$_bx" = "direct_ip" ]; then
+    case "$_btr" in
+      wss|wssmux) die "backhaul-e direct-IP ba '${_btr}' az hamin gvahi estefade mikonad. aval an ra be 'wsmux' bebar ya khamoosh kon: ratholectl backhaul on <port> wsmux <profile> direct_ip" ;;
+    esac
+  fi
+  local tmp; tmp="$(rth_mktemp)" || die "sakht-e file-e movaghat nashod."
+  jq 'del(.ip_tls)' "$STATE" > "$tmp" || die "hazf IP TLS az state shekast khord."
+  [ -s "$tmp" ] || die "state khali shod; state dast-nakhorde mand."
+  mv "$tmp" "$STATE"
+  regenerate
+  log "vhost-e IP TLS khamoosh shod; file-e cert/private-key pak nashod."
+}
+
+cmd_cert(){
+  need_root; need_bin jq; ensure_state
+  local domain="${1:-}" email="${2:-}"
+  [ -n "$domain" ] || die "estefade: ratholectl cert <domain> [email]"
+  echo "$domain" | grep -qE '^[A-Za-z0-9_.-]+$' || die "damnh namotabar."
+  command -v certbot >/dev/null 2>&1 || die "certbot nasb nist."
+  warn "niaz: DNS $domain be hamin server asharh konad va port 80 azad bashad."
+  local was_active=0
+  systemctl is-active --quiet nginx && { was_active=1; systemctl stop nginx; }
+  local args=(certonly --standalone --non-interactive --agree-tos -d "$domain")
+  if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
+  local cbt="${RATHOLE_CERTBOT_TIMEOUT:-300}" cb=(certbot)
+  command -v timeout >/dev/null 2>&1 && cb=(timeout "$cbt" certbot)
+  if "${cb[@]}" "${args[@]}"; then
+    local fc="/etc/letsencrypt/live/${domain}/fullchain.pem"
+    local key="/etc/letsencrypt/live/${domain}/privkey.pem"
+    log "gvahi grfth shod: /etc/letsencrypt/live/${domain}/"
+    # tanzim damnh va gvahi be onvan damnh asli + baztolid nginx/server.toml
+    state_set '.domain' "$domain" str
+    state_set '.cert_fullchain' "$fc" str
+    state_set '.cert_key' "$key" str
+    [ "$was_active" -eq 1 ] && systemctl start nginx || true
+    regenerate
+    log "damnh asli be '$domain' taghir kard va nginx baztolid shod."
+  else
+    [ "$was_active" -eq 1 ] && systemctl start nginx || true
+    die "grftn gvahi shekast khord (DNS? port 80 bsth? filtr?)."
+  fi
+}
+
+# ---------- recover: bazgasht foori be config salem tak-damnh ----------
+# hameye domainhaye ezafi ra hazf va config asli ra baztolid mikonad (baraye rafe khrabi nginx).
+cmd_recover(){
+  need_root; need_bin jq; ensure_state
+  warn "recover: hazf hameye domainhaye ezafi va baztolid config tak-damnh (halat salem ghabli)."
+  local tmp; tmp="$(mktemp)"
+  jq 'del(.extra_domains)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  regenerate
+  local out; out="$(jq -r '.nginx_conf // empty' "$STATE" 2>/dev/null)"; [ -n "$out" ] || out="$NGINX_CONF"
+  if command -v nginx >/dev/null 2>&1 && ! nginx -t >/dev/null 2>&1; then
+    if [ -f "$out.rathole-good.bak" ]; then
+      cp -a "$out.rathole-good.bak" "$out"; nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
+      warn "config known-good bazgardande shod."
+    fi
+  fi
+  log "recover tamam shod. barresi: ratholectl doctor"
+}
+
+# ---------- mdirit chand damnh hamzaman rooye yek server Iran ----------
+cmd_domain(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-ls}"; shift || true
+  case "$sub" in
+    add) cmd_domain_add "$@" ;;
+    primary) cmd_domain_primary "$@" ;;
+    rm)  cmd_domain_rm "${1:-}" ;;
+    ls)  cmd_domain_ls ;;
+    *) die "estefade: ratholectl domain <add|primary|rm|ls> ..." ;;
+  esac
+
+}
+
+cmd_domain_add(){
+  local domain="${1:-}"; shift || true
+  [ -n "$domain" ] || die "estefade: ratholectl domain add <domain> [--certbot] [--email E] [--fullchain F] [--key K]"
+  echo "$domain" | grep -qE '^[A-Za-z0-9_.-]+$' || die "damnh namotabar."
+  local use_certbot=0 email="" fc="" key=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --certbot) use_certbot=1; shift;;
+    --email) email="${2:-}"; shift 2;;
+    --fullchain) fc="${2:-}"; shift 2;;
+    --key) key="${2:-}"; shift 2;;
+    *) shift;;
+  esac; done
+  [ "$domain" = "$(s_get '.domain')" ] && die "in hamon damnh asli ast; ba 'set domain' avazsh kon na 'domain add'."
+  if [ "$use_certbot" -eq 1 ]; then
+    command -v certbot >/dev/null 2>&1 || die "certbot nasb nist."
+    warn "niaz: DNS $domain be hamin server + port 80 azad."
+    local was=0; systemctl is-active --quiet nginx && { was=1; systemctl stop nginx; }
+    local args=(certonly --standalone --non-interactive --agree-tos -d "$domain")
+    if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
+    local cbt="${RATHOLE_CERTBOT_TIMEOUT:-300}" cb=(certbot)
+    command -v timeout >/dev/null 2>&1 && cb=(timeout "$cbt" certbot)
+    if "${cb[@]}" "${args[@]}"; then
+      fc="/etc/letsencrypt/live/${domain}/fullchain.pem"; key="/etc/letsencrypt/live/${domain}/privkey.pem"
+      [ "$was" -eq 1 ] && systemctl start nginx || true
+    else
+      [ "$was" -eq 1 ] && systemctl start nginx || true
+      die "grftn gvahi shekast khord (DNS? port 80?)."
+    fi
+  fi
+  [ -n "$fc" ] || fc="/etc/letsencrypt/live/${domain}/fullchain.pem"
+  [ -n "$key" ] || key="/etc/letsencrypt/live/${domain}/privkey.pem"
+  # agar gvahi ekhtsasi in damnh nist (masalan CNAME posht-e Cloudflare ke TLS-ash ba CF anjam mishavad),
+  # az gvahi damnh asli estefade kon ta baz ham yek server-block ba server_name daghigh sakhte shavad
+  # (ke rooye Host-e daghigh az default_server-e site-haye digar mesl pasteshare barande ast).
+  if [ ! -f "$fc" ] || [ ! -f "$key" ]; then
+    local mfc mkey; mfc="$(s_get '.cert_fullchain')"; mkey="$(s_get '.cert_key')"
+    if [ -f "$mfc" ] && [ -f "$mkey" ]; then
+      warn "gvahi ekhtsasi '$domain' nist; az gvahi damnh asli estefade shod (monaseb baraye CNAME posht-e Cloudflare/Full)."
+      fc="$mfc"; key="$mkey"
+    else
+      die "gvahi peyda nashod: $fc / $key (aval ba --certbot begir ya masir bede)."
+    fi
+  fi
+  local tmp; tmp="$(mktemp)"
+  jq --arg d "$domain" --arg fc "$fc" --arg k "$key" \
+     '.extra_domains = ((.extra_domains // []) | map(select(.domain!=$d)) + [{domain:$d,fullchain:$fc,key:$k}])' \
+     "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  log "damnh '$domain' ezafe shod (gvahi: $fc)."
+  regenerate
+}
+
+cmd_domain_primary(){
+  local newd="${1:-}"; shift || true
+  [ -n "$newd" ] || die "estefade: ratholectl domain primary <domain> [--certbot] [--email E] [--fullchain F] [--key K]"
+  echo "$newd" | grep -qE '^[A-Za-z0-9_.-]+$' || die "damnh namotabar."
+  local cur ofc okey; cur="$(s_get '.domain')"; ofc="$(s_get '.cert_fullchain')"; okey="$(s_get '.cert_key')"
+  [ "$newd" = "$cur" ] && die "damnh '$newd' hamin alan asli ast."
+  local use_certbot=0 email="" fc="" key=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --certbot)   use_certbot=1; shift;;
+    --email)     email="${2:-}"; shift 2;;
+    --fullchain) fc="${2:-}"; shift 2;;
+    --key)       key="${2:-}"; shift 2;;
+    *) shift;;
+  esac; done
+  # agar damnh jadid ghablan extra bood, gvahi khodesh ra estefade kon
+  if [ -z "$fc" ] && [ "$use_certbot" -eq 0 ]; then
+    local exfc exkey
+    exfc="$(jq -r --arg d "$newd" '(.extra_domains // [])[]|select(.domain==$d)|.fullchain' "$STATE" 2>/dev/null)"
+    if [ -n "$exfc" ] && [ "$exfc" != null ]; then
+      fc="$exfc"; exkey="$(jq -r --arg d "$newd" '(.extra_domains // [])[]|select(.domain==$d)|.key' "$STATE" 2>/dev/null)"
+      [ "$exkey" != null ] && key="$exkey"
+    fi
+  fi
+  if [ "$use_certbot" -eq 1 ]; then
+    command -v certbot >/dev/null 2>&1 || die "certbot nasb nist."
+    warn "niaz: DNS $newd be hamin server + port 80 azad."
+    local was=0; systemctl is-active --quiet nginx && { was=1; systemctl stop nginx; }
+    local args=(certonly --standalone --non-interactive --agree-tos -d "$newd")
+    if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
+    local cbt="${RATHOLE_CERTBOT_TIMEOUT:-300}" cb=(certbot)
+    command -v timeout >/dev/null 2>&1 && cb=(timeout "$cbt" certbot)
+    if "${cb[@]}" "${args[@]}"; then
+      fc="/etc/letsencrypt/live/${newd}/fullchain.pem"; key="/etc/letsencrypt/live/${newd}/privkey.pem"
+      [ "$was" -eq 1 ] && systemctl start nginx || true
+    else
+      [ "$was" -eq 1 ] && systemctl start nginx || true
+      die "grftn gvahi shekast khord (DNS? port 80?)."
+    fi
+  fi
+  [ -n "$fc" ]  || fc="/etc/letsencrypt/live/${newd}/fullchain.pem"
+  [ -n "$key" ] || key="/etc/letsencrypt/live/${newd}/privkey.pem"
+  { [ -f "$fc" ] && [ -f "$key" ]; } || die "gvahi damnh jadid peyda nashod: $fc / $key (aval --certbot ya masir bede)."
+  # taghir atomic: damnh ghabli -> extra (agar gvahi darad), damnh jadid -> asli, va az extra hazf
+  local tmp; tmp="$(mktemp)"
+  jq --arg nd "$newd" --arg nfc "$fc" --arg nk "$key" \
+     --arg od "$cur" --arg ofc "$ofc" --arg okey "$okey" '
+     (.extra_domains // []) as $ex
+     | ($ex | map(select(.domain != $nd and .domain != $od))) as $rest
+     | (if ($ofc|length) > 0 then $rest + [{domain:$od, fullchain:$ofc, key:$okey}] else $rest end) as $withold
+     | .extra_domains = $withold
+     | .domain = $nd | .cert_fullchain = $nfc | .cert_key = $nk
+     ' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  log "damnh asli be '$newd' taghir krd. damnh ghabli '$cur' be extra montaghel shod va hamchenan faal ast."
+  warn "node-haye ghadimi ba $cur:443 bedoon ghati kar mikonand; damnh jadid $newd ham az hamin lahze faal ast."
+  regenerate
+}
+
+cmd_domain_rm(){
+  local domain="${1:-}"
+  [ -n "$domain" ] || die "estefade: ratholectl domain rm <domain>"
+  jq -e --arg d "$domain" '(.extra_domains // [])[]|select(.domain==$d)' "$STATE" >/dev/null 2>&1 || die "damnh ezafi '$domain' peyda nashod."
+  local tmp; tmp="$(mktemp)"
+  jq --arg d "$domain" '.extra_domains = ((.extra_domains // []) | map(select(.domain!=$d)))' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  log "damnh '$domain' hazf shod."
+  regenerate
+}
+
+cmd_domain_ls(){
+  need_bin jq; ensure_state
+  echo "DOMAIN|FULLCHAIN|KEY|PRIMARY"
+  echo "$(s_get '.domain')|$(s_get '.cert_fullchain')|$(s_get '.cert_key')|yes"
+  jq -r '(.extra_domains // [])[] | [.domain,.fullchain,.key,"no"] | join("|")' "$STATE" 2>/dev/null || true
+}
+
+# ---------- kcp/FEC tunnel (mkhfiknndh loss msir; mvazi ba websocket/443) ----------
+
+# kcptun rooye UDP mishnvd va be port kontroli rathole (127.0.0.1:control_port) fvrvard mikonad.
+# hich tghiiri dar rathole-server/nginx/443 nmidhd; yek masir vrvdi dovom ezafe mikonad.
+KCP_SRV_BIN=/usr/local/bin/kcptun-server
+KCP_SRV_UNIT=/etc/systemd/system/rathole-kcp-server.service
+# mkhzn asli xtaci/kcptun arshiv shode va bainrihaish hazf shdh; az mirvr ossfork estefade mikonim.
+KCPTUN_VER_DEF="v20260129"
+KCPTUN_BASE_DEF="https://github.com/ossfork/kcptun/releases/download"
+
+install_kcptun(){ # $1=server|client  → nasb bainri dar /usr/local/bin/kcptun-$1
+  local role="$1" bin="/usr/local/bin/kcptun-$1" ver="${KCPTUN_VER:-$KCPTUN_VER_DEF}" base="${KCPTUN_BASE:-$KCPTUN_BASE_DEF}" arch tmp url
+  [ -x "$bin" ] && return 0
+  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; armv7l) arch=armv7 ;; *) die "memari poshtibani nemishavad." ;; esac
+  command -v curl >/dev/null 2>&1 || die "curl lazem ast."
+  log "download kcptun ${ver} ($role)..."
+  tmp="$(rth_mktempd)"
+  url="${base}/${ver}/kcptun_linux_${arch}.tar.gz"
+  curl -fsSL "$url" -o "$tmp/k.tgz" || { rm -rf "$tmp"; die "download kcptun shekast khord (nskhh/shbkh?)."; }
+  tar -xzf "$tmp/k.tgz" -C "$tmp" || { rm -rf "$tmp"; die "baz kardan arshiv kcptun shekast khord."; }
+  install -m755 "$tmp/${role}_linux_${arch}" "$bin" || { rm -rf "$tmp"; die "nasb bainri kcptun shekast khord."; }
+  rm -rf "$tmp"
+  log "kcptun-$role nasb shod: $bin"
+}
+
+# profile FEC ("datashard parityshard mode sndwnd rcvwnd") dar common.sh:kcp_profile ast —
+# amdan inja copy NEMISHAVAD: parametr-haye FEC bayad DAR DO TARAF (Iran va node) daghighan
+# yeksan bashand، pas bayad yek manba dashte bashand.
+
+cmd_kcp(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    on)   cmd_kcp_on "$@" ;;
+    off)  cmd_kcp_off ;;
+    status) cmd_kcp_status ;;
+    show) print_kcp_connect ;;
+    *) die "estefade: ratholectl kcp <on [port] [profile]|off|status|show>  (profile: balanced|lossy|aggressive)" ;;
+  esac
+}
+
+cmd_kcp_on(){
+  local port="${1:-443}" profile="${2:-balanced}" ctrl key params ds ps mode sw rw
+  echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+  params="$(kcp_profile "$profile")" || die "profile namotabar: $profile (balanced|lossy|aggressive)"
+  read -r ds ps mode sw rw <<<"$params"
+  ctrl="$(s_get '.control_port')"; case "$ctrl" in ''|null) ctrl=2333 ;; esac
+  # kelid mojood ra ngh dar, dar ghir ainsvrt bsaz
+  key="$(jq -r '.kcp.key // empty' "$STATE" 2>/dev/null)"
+  [ -n "$key" ] || key="$(gen_token)"
+  install_kcptun server
+  # zkhirh dar state
+  local tmp; tmp="$(mktemp)"
+  jq --argjson p "$port" --arg k "$key" --argjson c "$ctrl" --arg prof "$profile" \
+     --argjson ds "$ds" --argjson ps "$ps" --arg mode "$mode" --argjson sw "$sw" --argjson rw "$rw" \
+     '.kcp = {enabled:true, port:$p, key:$k, target:("127.0.0.1:"+($c|tostring)),
+              profile:$prof, mtu:1350, sndwnd:$sw, rcvwnd:$rw, datashard:$ds, parityshard:$ps, mode:$mode, crypt:"aes-128"}' \
+     "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  gen_kcp_server_unit
+  systemctl daemon-reload
+  systemctl enable rathole-kcp-server >/dev/null 2>&1
+  systemctl restart rathole-kcp-server 2>/dev/null
+  if systemctl is-active --quiet rathole-kcp-server; then
+    log "kcp-server rooye UDP :$port faal shod → 127.0.0.1:$ctrl (profile: $profile)."
+  else
+    err "rathole-kcp-server bala niamd; log: journalctl -u rathole-kcp-server -n 30"
+  fi
+  if [ "$port" = 443 ]; then
+    log "estetar: UDP/443 baraye DPI shbih QUIC/HTTP3 didh mishavad (tdakhli ba nginx rooye TCP/443 nadarad)."
+  fi
+  warn "firewall: port UDP $port ra baz kon (masalan: ufw allow $port/udp , ya Security Group abri)."
+  print_kcp_connect
+}
+
+gen_kcp_server_unit(){
+  local k; k="$(jq -r '.kcp' "$STATE")"
+  local port target key mtu sw rw ds ps mode crypt
+  port="$(echo "$k" | jq -r '.port')";     target="$(echo "$k" | jq -r '.target')"
+  key="$(echo "$k" | jq -r '.key')";       mtu="$(echo "$k" | jq -r '.mtu')"
+  sw="$(echo "$k" | jq -r '.sndwnd')";     rw="$(echo "$k" | jq -r '.rcvwnd')"
+  ds="$(echo "$k" | jq -r '.datashard')";  ps="$(echo "$k" | jq -r '.parityshard')"
+  mode="$(echo "$k" | jq -r '.mode')";     crypt="$(echo "$k" | jq -r '.crypt')"
+  cat > "$KCP_SRV_UNIT" <<UNIT
+[Unit]
+Description=rathole kcp-server (UDP+FEC entry -> rathole control)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${KCP_SRV_BIN} -t ${target} -l :${port} -key ${key} -crypt ${crypt} -mode ${mode} -mtu ${mtu} -sndwnd ${sw} -rcvwnd ${rw} -datashard ${ds} -parityshard ${ps} -dscp 46 -nocomp
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+cmd_kcp_off(){
+  systemctl disable --now rathole-kcp-server 2>/dev/null || true
+  rm -f "$KCP_SRV_UNIT"; systemctl daemon-reload 2>/dev/null || true
+  local tmp; tmp="$(mktemp)"
+  jq '(.kcp.enabled) = false' "$STATE" > "$tmp" 2>/dev/null && mv "$tmp" "$STATE" || rm -f "$tmp"
+  log "kcp-server khamoosh shod. tunnelha az haman masir websocket/443 kar mikonand."
+}
+
+cmd_kcp_status(){
+  local en; en="$(jq -r '.kcp.enabled // false' "$STATE" 2>/dev/null)"
+  if [ "$en" != true ]; then echo "kcp: $(c_y 'khamoosh') (tunnel fali rooye websocket/443)"; return; fi
+  local port prof; port="$(jq -r '.kcp.port' "$STATE")"; prof="$(jq -r '.kcp.profile // "balanced"' "$STATE")"
+  echo "kcp: $(c_g 'roshan')  UDP :$port → 127.0.0.1:$(s_get '.control_port')  (profile: $prof)"
+  [ "$port" = 443 ] && echo "  estetar: UDP/443 ~ QUIC/HTTP3"
+  systemctl is-active --quiet rathole-kcp-server && echo "  service: $(c_g 'active')" || echo "  service: $(c_r 'inactive')"
+  command -v ss >/dev/null 2>&1 && { ss -lunH "sport = :$port" 2>/dev/null | grep -q . && echo "  gvshdadn UDP:$port: $(c_g 'blh')" || echo "  gvshdadn UDP:$port: $(c_r 'khir')"; }
+}
+
+print_kcp_connect(){
+  local en; en="$(jq -r '.kcp.enabled // false' "$STATE" 2>/dev/null)"
+  [ "$en" = true ] || { warn "kcp khamoosh ast; aval: ratholectl kcp on [port] [profile]"; return; }
+  local ip port key prof
+  ip="$(detect_ip)"
+  port="$(jq -r '.kcp.port' "$STATE")"; key="$(jq -r '.kcp.key' "$STATE")"; prof="$(jq -r '.kcp.profile // "balanced"' "$STATE")"
+  echo
+  echo "$(c_y '──────── faalsazi kcp rooye node kharej ────────')"
+  echo "rooye node in ra bezan (masir tunnel az 443 be UDP+FEC switch mishavad):"
+  echo "  ratholenode kcp on ${ip:-<IRAN_IP>}:${port} ${key} ${prof}"
+  echo
+  echo "bazgsht be halat ghabli (websocket/443):  ratholenode kcp off"
+  echo "$(c_y '────────────────────────────────────────────')"
+  echo "nokte: serviceha/tokenha/path karbaran tghiiri nmiknnd; fght masir hml tunnel avz mishavad."
+}
+
+# ---------- sait fik panel (backend pishfarz / rooye fake_port) ----------
+# baraye srvrhai airane rlh (bedoon panel vaghai) ke bayad / yek sfhh bdhd nh 502.
+PANEL_FAKEWEB_SVC="rathole-panel-fakeweb"
+cmd_fakeweb(){
+  need_root
+  local action="${1:-}" port="${2:-}"
+  if [ -z "$port" ] && [ -f "$STATE" ]; then port="$(s_get '.fake_port' 2>/dev/null)"; fi
+  case "$port" in ''|null) port=8000 ;; esac
+  case "$action" in
+    start)
+      command -v python3 >/dev/null 2>&1 || die "python3 nasb nist (apt install -y python3)."
+      # hoshdar tadakhol: agar chiz digari (panel vaghai) rooye in port ast, fik ra ainja start nakon
+      if ss -ltnH "sport = :$port" 2>/dev/null | grep -q . ; then
+        warn "chizi az ghabl rooye 127.0.0.1:$port gvsh midhd; agar panel vaghai ast, fakeweb lazem nist."
+      fi
+      mkdir -p /var/www/rathole-fake
+      rth_write_fakeweb_html /var/www/rathole-fake
+      cat > /etc/systemd/system/${PANEL_FAKEWEB_SVC}.service <<UNIT
+[Unit]
+Description=rathole panel fake web (default site on fake_port)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server ${port} --bind 127.0.0.1 --directory /var/www/rathole-fake
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+      systemctl daemon-reload
+      systemctl enable ${PANEL_FAKEWEB_SVC} >/dev/null 2>&1
+      systemctl restart ${PANEL_FAKEWEB_SVC}
+      log "sait fik panel rooye 127.0.0.1:${port} bala amad (rfa 502 rooye /)."
+      ;;
+    stop)   systemctl stop ${PANEL_FAKEWEB_SVC} 2>/dev/null && log "motevaghef shod." || warn "ejra naboodan." ;;
+    rm)     systemctl disable --now ${PANEL_FAKEWEB_SVC} 2>/dev/null || true
+            rm -f /etc/systemd/system/${PANEL_FAKEWEB_SVC}.service; systemctl daemon-reload; log "hazf shod." ;;
+    status) systemctl --no-pager status ${PANEL_FAKEWEB_SVC} | sed -n '1,8p' || true ;;
+    *) die "estefade: ratholectl fakeweb <start|stop|rm|status> [port]" ;;
+  esac
+}
+
+# ---------- tune: BBR + limithaye system va nginx (rfa 502 zir burst) ----------
+cmd_tune(){
+  need_root
+  log "eemal tuning system (BBR + file limits + conntrack + backlog)..."
+  modprobe nf_conntrack 2>/dev/null || true
+  cat >/etc/sysctl.d/99-rathole-tune.conf <<'EOF'
+# BBR va sf khorooji
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_fastopen=3
+# zrfit kankshn/file (rfa 502 zir burst WS/gim)
+fs.file-max=2097152
+net.core.somaxconn=65535
+net.core.netdev_max_backlog=16384
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.ip_local_port_range=1024 65535
+net.netfilter.nf_conntrack_max=1048576
+# bafrhai bzrg UDP baraye kcptun (throughput bhtr rooye masir FEC)
+net.core.rmem_max=26214400
+net.core.wmem_max=26214400
+net.core.rmem_default=26214400
+net.core.wmem_default=26214400
+EOF
+  sysctl --system >/dev/null 2>&1 || true
+  log "BBR=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)  conntrack_max=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo n/a)"
+
+  # tanzim worker nginx
+  local nc=/etc/nginx/nginx.conf
+  if [ -f "$nc" ]; then
+    cp -a "$nc" "$nc.rathole-tune.bak"
+    grep -q 'worker_rlimit_nofile' "$nc" || \
+      sed -i '0,/^worker_processes/s//worker_rlimit_nofile 1048576;\nworker_processes/' "$nc"
+    sed -i -E 's/worker_connections[[:space:]]+[0-9]+;/worker_connections 65535;/' "$nc"
+    if nginx -t 2>/dev/null; then
+      systemctl reload nginx
+      log "nginx worker tuning eemal va reload shod."
+    else
+      err "nginx -t khata dad; backup bazgrdandh shod ($nc.rathole-tune.bak)."
+      cp -a "$nc.rathole-tune.bak" "$nc"
+    fi
+  fi
+  log "tuning kamel shod. rooye node kharej ham 'ratholenode tune' ra bezan."
+}
+
+# ---------- ikparchgi panel web ba nginx (location /hub/ paidar) ----------
+# `hub on` bar-e aval hub ra khodesh nasb mikonad (install-hub.sh); dafe-haye baad
+# faghat port ra hamgam mikonad: listen_port-e config-e hub + restart-e service + nginx.
+HUB_CONF="/etc/ratholehub/config.json"
+hub_installed(){ [ -f "$HUB_CONF" ] && [ -f /etc/systemd/system/ratholehub.service ]; }
+hub_listen_port(){ jq -r '.listen_port // empty' "$HUB_CONF" 2>/dev/null; }
+hub_set_listen_port(){
+  # dar-ja minevisim (cat >) ta permission 600 va inode hefz shavad
+  local p="$1" tmp rc=0; tmp="$(rth_mktemp)" || return 1
+  jq --argjson p "$p" '.listen_port=$p' "$HUB_CONF" > "$tmp" && cat "$tmp" > "$HUB_CONF" || rc=1
+  rm -f "$tmp"
+  return "$rc"
+}
+hub_installer(){
+  local c
+  for c in "$SCRIPT_DIR/ratholehub/install-hub.sh" /opt/rathole-manager/ratholehub/install-hub.sh; do
+    [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+cmd_hub(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-status}" port="${2:-}"
+  case "$sub" in
+    on)
+      if [ -n "$port" ]; then
+        echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      fi
+      # bar-e aval: nasb-e khodkar-e hub (service + config + ramz); dafe-haye baad faghat hamgam-sazi-ye port
+      if ! hub_installed; then
+        local inst
+        inst="$(hub_installer)" || die "install-hub.sh peyda nashod (na kenar-e script na /opt/rathole-manager/ratholehub); aval bundle ra nasb kon ya dasti ejra kon: sudo bash ratholehub/install-hub.sh"
+        port="${port:-8088}"
+        log "hub hanooz nasb nashode; nasb-e khodkar shoroo shod (port $port) ..."
+        RATHOLECTL_HUB_FROM_CTL=1 HUB_PORT="$port" bash "$inst" || die "nasb-e hub shekast khord; dasti emtehan kon: sudo HUB_PORT=$port bash $inst"
+      fi
+      # config-e hub manba-e haghighat-e port ast; port-e jadid → config avaz + restart
+      local cur; cur="$(hub_listen_port)"
+      port="${port:-${cur:-8088}}"
+      if [ -n "$cur" ] && [ "$cur" != "$port" ]; then
+        hub_set_listen_port "$port" || die "berooz-resani-ye $HUB_CONF shekast khord."
+        systemctl restart ratholehub 2>/dev/null || true
+        log "listen_port-e hub avaz shod: $cur → $port (ratholehub restart shod)."
+      fi
+      systemctl is-active --quiet ratholehub 2>/dev/null || systemctl start ratholehub 2>/dev/null || true
+      systemctl is-active --quiet ratholehub 2>/dev/null || warn "service ratholehub bala nayamad! bebin: journalctl -u ratholehub -n 30"
+      state_set '.hub_port' "$port" num
+      log "panel psht nginx faal shod: https://$(s_get '.domain')/$(hub_path_seg)/  →  127.0.0.1:$port"
+      warn "panel hala amvmi ast; ramz ghvi rooye hab bgzar."
+      regenerate
+      ;;
+    off)
+      local tmp; tmp="$(mktemp)"; jq 'del(.hub_port)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      log "panel az nginx hazf shod (location /$(hub_path_seg)/ brdashth shod)."
+      if systemctl is-active --quiet ratholehub 2>/dev/null; then
+        warn "service ratholehub hamchenan roshan ast (127.0.0.1; dstrsi fght ba SSH-forward). khamoosh: systemctl stop ratholehub"
+      fi
+      regenerate
+      ;;
+    status)
+      local hp lp; hp="$(jq -r '.hub_port // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$hp" ]; then echo "panel psht nginx: $(c_g "https://$(s_get '.domain')/$(hub_path_seg)/")  (port dakhli $hp)"
+      else echo "panel psht nginx: $(c_y 'gheyre-faal')  (dstrsi fght ba SSH-forward)"; fi
+      if hub_installed; then
+        lp="$(hub_listen_port)"
+        if systemctl is-active --quiet ratholehub 2>/dev/null; then echo "service ratholehub: $(c_g 'faal')  (127.0.0.1:${lp:-?})"
+        else echo "service ratholehub: $(c_r 'khamoosh/kharab')  (bebin: journalctl -u ratholehub -n 30)"; fi
+        if [ -n "$hp" ] && [ -n "$lp" ] && [ "$hp" != "$lp" ]; then
+          warn "port-e nginx ($hp) ba listen_port-e hub ($lp) yeki nist! dorostesh: ratholectl hub on $lp"
+        fi
+      else
+        echo "service ratholehub: $(c_y 'nasb nashode')  (nasb-e khodkar: ratholectl hub on [port])"
+      fi
+      ;;
+    *) die "estefade: ratholectl hub <on [port]|off|status>" ;;
+  esac
+}
+
+# ---------- plain: tunnel-e websocket bedoon-e TLS (listener-e HTTP-e sade rooye port jda) ----------
+# yek server-block-e HTTP (bedoon ssl) rooye port entekhabi baz mikonad ke websocket ra be
+# port kontroli rathole forward mikonad. TLS-i dar in masir nist (sabok-tar, vali bedoon ramz-e nginx).
+cmd_plain(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-status}" port="${2:-}"
+  case "$sub" in
+    on)
+      port="${port:-8880}"
+      echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      [ "$port" = "443" ] && die "port 443 baraye halat TLS rezerv ast; port-e digari (masalan 8880) bede."
+      state_set '.plain_port' "$port" num
+      log "halat plain (bedoon TLS) faal shod: listener HTTP rooye port $port → kontrol rathole."
+      warn "firewall: port TCP $port ra baz kon (masalan: ufw allow $port/tcp)."
+      command -v ufw >/dev/null 2>&1 && ufw allow "$port/tcp" >/dev/null 2>&1 || true
+      regenerate
+      print_plain_connect
+      ;;
+    off)
+      local tmp; tmp="$(mktemp)"; jq 'del(.plain_port)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      log "halat plain khamoosh shod (listener HTTP hazf shod). node-ha bayad be halat TLS bargardand."
+      regenerate
+      ;;
+    status)
+      local pp; pp="$(jq -r '.plain_port // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$pp" ] && [ "$pp" != null ]; then
+        echo "plain (bedoon TLS): $(c_g 'roshan')  listener HTTP rooye port $pp"
+        command -v ss >/dev/null 2>&1 && { ss -ltnH "sport = :$pp" 2>/dev/null | grep -q . && echo "  gvshdadn TCP:$pp: $(c_g 'blh')" || echo "  gvshdadn TCP:$pp: $(c_r 'khir')"; }
+      else
+        echo "plain (bedoon TLS): $(c_y 'khamoosh')  (tunnelha rooye websocket/443 ba TLS)"
+      fi
+      ;;
+    show) print_plain_connect ;;
+    *) die "estefade: ratholectl plain <on [port]|off|status|show>" ;;
+  esac
+}
+
+print_plain_connect(){
+  local pp; pp="$(jq -r '.plain_port // empty' "$STATE" 2>/dev/null)"
+  [ -n "$pp" ] && [ "$pp" != null ] || { warn "plain khamoosh ast; aval: ratholectl plain on [port]"; return; }
+  local ip
+  ip="$(detect_ip)"
+  echo
+  echo "$(c_y '──────── faalsazi halat plain (bedoon TLS) rooye node kharej ────────')"
+  echo "rooye node in ra bezan (masir tunnel az TLS/443 be ws-e sade switch mishavad):"
+  echo "  ratholenode plain on ${ip:-<IRAN_IP>}:${pp}"
+  echo
+  echo "bazgsht be halat TLS (websocket/443):  ratholenode plain off"
+  echo "$(c_y '──────────────────────────────────────────────────')"
+  echo "nokte: serviceha/tokenha/path karbaran tghiiri nmiknnd; fght TLS-e masir-e tunnel bardashte mishavad."
+}
+
+# ---------- direct-IP: masiryabi ba header rooye port-e sade (bedoon TLS/auth) ----------
+cmd_direct(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    on)
+      local port="" header="" a
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --port)   port="${2:-}"; shift 2 || shift;;
+          --header) header="${2:-}"; shift 2 || shift;;
+          *) a="$1"; shift;;
+        esac
+      done
+      port="${port:-8081}"; header="${header:-X-Cdn-Id}"
+      echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      [ "$port" = "443" ] && die "port 443 baraye masir-e TLS/game rezerv ast; port-e digari (masalan 8081) bede."
+      local internal; internal="$(jq -r '.internal_port // 8443' "$STATE" 2>/dev/null)"
+      [ "$port" = "$internal" ] && die "port $port ba internal_port-e game/SNI tadakhol darad; port-e digari bede."
+      echo "$header" | grep -qE '^[A-Za-z0-9-]{1,40}$' || die "header faghat hrvf/adad/khttirh (-) mjaz ast."
+      state_set '.direct_port' "$port" num
+      state_set '.direct_header' "$header"
+      log "halat direct-IP (masiryabi ba header, bedoon TLS) faal shod: listener HTTP rooye port $port, header '$header'."
+      warn "firewall: port TCP $port ra baz kon (masalan: ufw allow $port/tcp)."
+      warn "in listener bedoon TLS/auth ast; ehrazhoviat dar laye-ye proxy-e daroon-e tunnel ast."
+      command -v ufw >/dev/null 2>&1 && ufw allow "$port/tcp" >/dev/null 2>&1 || true
+      regenerate
+      print_direct_connect
+      ;;
+    off)
+      local tmp; tmp="$(mktemp)"; jq 'del(.direct_port, .direct_header)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      log "halat direct-IP khamoosh shod (listener HTTP hazf shod). port-e firewall ra mitavani bebandi."
+      regenerate
+      ;;
+    status)
+      local dp dh; dp="$(jq -r '.direct_port // empty' "$STATE" 2>/dev/null)"; dh="$(jq -r '.direct_header // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$dp" ] && [ "$dp" != null ]; then
+        echo "direct-IP (header-based): $(c_g 'roshan')   port $dp   header: ${dh:-X-Cdn-Id}"
+        command -v ss >/dev/null 2>&1 && { ss -ltnH "sport = :$dp" 2>/dev/null | grep -q . && echo "  gvshdadn TCP:$dp: $(c_g 'blh')" || echo "  gvshdadn TCP:$dp: $(c_r 'khir')"; }
+        local nlist; nlist="$(jq -r --arg h "${dh:-X-Cdn-Id}" '[.nodes[] | select(.sni==null) | "\(.name) -> \"\($h): \(.name)\""] | join(",  ")' "$STATE" 2>/dev/null)"
+        [ -n "$nlist" ] && echo "  node-ha:  $nlist"
+        echo "  $(c_y 'hoshdar'): in listener bedoon TLS/auth ast; ehrazhoviat dar laye-ye proxy-e daroon-e tunnel ast."
+      else
+        echo "direct-IP (header-based): $(c_y 'khamoosh')   (tunnelha rooye websocket/443 ba TLS)"
+      fi
+      ;;
+    show) print_direct_connect "${1:-}" ;;
+    *) die "estefade: ratholectl direct <on [--port P] [--header H]|off|status|show [name]>" ;;
+  esac
+}
+
+print_direct_connect(){
+  local dp dh ip name path node_hdr
+  dp="$(jq -r '.direct_port // empty' "$STATE" 2>/dev/null)"
+  [ -n "$dp" ] && [ "$dp" != null ] || { warn "direct khamoosh ast; aval: ratholectl direct on"; return; }
+  dh="$(jq -r '.direct_header // "X-Cdn-Id"' "$STATE" 2>/dev/null)"; case "$dh" in ''|null) dh="X-Cdn-Id" ;; esac
+  ip="$(detect_ip)"
+  name="${1:-}"
+  if [ -n "$name" ]; then
+    jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 || die "node '$name' peyda nashod."
+    path="/$name"; node_hdr="$name"
+  else
+    path="/<node_name>"; node_hdr="<node_name>"
+  fi
+  echo
+  echo "$(c_y '──────── tanzim-e client (Xray/V2Ray) baraye halat direct-IP ────────')"
+  echo "transport: WebSocket bedoon TLS"
+  echo "  address : ${ip:-<IRAN_IP>}"
+  echo "  port    : ${dp}"
+  echo "  ws path : ${path}"
+  echo "  ws Host : myket.ir      # decoy — har domain-e bikhatari mishavad"
+  echo "  header  : ${dh}: ${node_hdr}"
+  echo "$(c_y '──────────────────────────────────────────────────')"
+  echo "nokte: in masir bedoon TLS/auth ast; ehraz-e hoviat dar khod-e proxy (VLESS/VMess UUID) anjam mishavad."
+}
+
+# ---------- noise: transport-e ramznegari-shode (rathole Noise) rooye instans-e dovom, bedoon nginx/TLS/cert ----------
+# yek prose-ye rathole-e dovom (rathole-noise) rooye port-e TCP-e omomi. har node ba 'noise node <name> on'
+# be in masir montaghel mishavad; service-e an az server.toml be noise-server.toml jabeja mishavad.
+NOISE_UNIT="/etc/systemd/system/${NOISE_SVC}.service"
+
+ensure_noise_unit(){
+  # unit-e systemd baraye instans-e dovom (agar hanooz sakhte nashode).
+  [ -f "$NOISE_UNIT" ] && return 0
+  cat > "$NOISE_UNIT" <<UNIT
+[Unit]
+Description=rathole noise server (encrypted tunnel, Iran panel)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rathole ${NOISE_TOML}
+Restart=always
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload 2>/dev/null || true
+  log "unit-e $NOISE_SVC sakhte shod."
+}
+
+cmd_noise(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    on)
+      local port="${1:-}"; port="${port:-2334}"
+      echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      [ "$port" = "443" ] && die "port 443 baraye masir-e TLS/game rezerv ast; port-e digari (masalan 2334) bede."
+      local internal; internal="$(jq -r '.internal_port // 8443' "$STATE" 2>/dev/null)"
+      [ "$port" = "$internal" ] && die "port $port ba internal_port-e game/SNI tadakhol darad; port-e digari bede."
+      noise_genkey
+      state_set '.noise_port' "$port" num
+      state_set '.noise_pattern' "${NOISE_PATTERN_DEFAULT}"
+      ensure_noise_unit
+      gen_noise_server_toml
+      systemctl enable "$NOISE_SVC" >/dev/null 2>&1 || true
+      warn "firewall: port TCP $port ra baz kon (masalan: ufw allow $port/tcp)."
+      command -v ufw >/dev/null 2>&1 && ufw allow "$port/tcp" >/dev/null 2>&1 || true
+      log "halat noise (ramznegari-shode) faal shod: rathole-noise rooye port-e omomi $port."
+      regenerate
+      systemctl restart "$NOISE_SVC" 2>/dev/null && log "$NOISE_SVC start shod." || err "start-e $NOISE_SVC nashod; log: journalctl -u $NOISE_SVC -n 30"
+      print_noise_connect "${1:-}"
+      ;;
+    off)
+      # transport-e node-haye NOISE ra hazf kon (nabvdan = ws), service ra khamoosh kon, state-key-haye noise ra hazf kon.
+      # faghat noise — vagarna node-haye backhaul ham bi-seda be ws bar migardand.
+      local tmp; tmp="$(mktemp)"
+      jq '(.nodes[] | select(.transport == "noise")) |= del(.transport)
+          | del(.noise_port,.noise_pattern,.noise_privkey,.noise_pubkey)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      systemctl disable --now "$NOISE_SVC" 2>/dev/null || true
+      rm -f "$NOISE_UNIT"; systemctl daemon-reload 2>/dev/null || true
+      rm -f "$NOISE_TOML"
+      log "halat noise khamoosh shod (rathole-noise hazf shod). node-haye noise be ws/443 bargardande shodand."
+      regenerate
+      ;;
+    node)
+      local name="${1:-}" act="${2:-}"
+      echo "$name" | grep -qE '^[A-Za-z0-9_-]{1,40}$' || die "name-e node namotabar ast."
+      jq -e --arg n "$name" '.nodes[] | select(.name==$n)' "$STATE" >/dev/null 2>&1 || die "node '$name' peyda nashod."
+      case "$act" in
+        on)
+          local np; np="$(jq -r '.noise_port // empty' "$STATE" 2>/dev/null)"
+          [ -n "$np" ] && [ "$np" != null ] || die "aval halat noise ra roshan kon: ratholectl noise on [port]"
+          # transport-e har node YEKI ast — node-e backhaul ra bi-seda switch nakon.
+          local cur; cur="$(jq -r --arg n "$name" '.nodes[] | select(.name==$n) | .transport // "ws"' "$STATE" 2>/dev/null)"
+          [ "$cur" = backhaul ] && die "node '$name' rooye core-e backhaul ast; aval 'ratholectl backhaul node $name off' ra bezan."
+          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "noise"' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          log "node '$name' be masir-e noise montaghel shod."
+          regenerate
+          print_noise_connect "$name"
+          ;;
+        off)
+          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="noise")) |= del(.transport)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          log "node '$name' be masir-e ws/443 bargasht."
+          regenerate
+          ;;
+        *) die "estefade: ratholectl noise node <name> <on|off>" ;;
+      esac
+      ;;
+    status)
+      local np; np="$(jq -r '.noise_port // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$np" ] && [ "$np" != null ]; then
+        local cnt; cnt="$(jq -r '[.nodes[] | select(.transport=="noise")] | length' "$STATE" 2>/dev/null)"
+        echo "noise (ramznegari-shode): $(c_g 'roshan')  rathole-noise rooye port-e omomi $np  (node-haye noise: ${cnt:-0})"
+        # list-e esm-e node-haye noise (baraye parse-e hub / namayesh-e per-node)
+        local nlist; nlist="$(jq -r '[.nodes[] | select(.transport=="noise") | .name] | join(", ")' "$STATE" 2>/dev/null)"
+        [ -n "$nlist" ] && echo "  node-haye noise: $nlist"
+        command -v ss >/dev/null 2>&1 && { ss -ltnH "sport = :$np" 2>/dev/null | grep -q . && echo "  gvshdadn TCP:$np: $(c_g 'blh')" || echo "  gvshdadn TCP:$np: $(c_r 'khir')"; }
+        command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet "$NOISE_SVC" && echo "  $NOISE_SVC: $(c_g 'active')" || echo "  $NOISE_SVC: $(c_r 'inactive')"; }
+      else
+        echo "noise (ramznegari-shode): $(c_y 'khamoosh')  (tunnelha rooye websocket/443 ba TLS)"
+      fi
+      ;;
+    show) print_noise_connect "${1:-}" ;;
+    *) die "estefade: ratholectl noise <on [port]|off|node <name> on|off|status|show [name]>" ;;
+  esac
+}
+
+print_noise_connect(){
+  local np pub pat ip
+  np="$(jq -r '.noise_port // empty' "$STATE" 2>/dev/null)"
+  [ -n "$np" ] && [ "$np" != null ] || { warn "noise khamoosh ast; aval: ratholectl noise on [port]"; return; }
+  pub="$(jq -r '.noise_pubkey // empty' "$STATE" 2>/dev/null)"
+  pat="$(jq -r '.noise_pattern // empty' "$STATE" 2>/dev/null)"; [ -n "$pat" ] && [ "$pat" != null ] || pat="$NOISE_PATTERN_DEFAULT"
+  ip="$(detect_ip)"
+  echo
+  echo "$(c_y '──────── faalsazi halat noise (ramznegari-shode) rooye node kharej ────────')"
+  echo "rooye node in ra bezan (masir tunnel ba Noise ramznegari mishavad — bedoon TLS/cert):"
+  echo "  ratholenode noise on ${ip:-<IRAN_IP>}:${np} ${pub:-<PUBKEY>} ${pat}"
+  echo
+  echo "bazgsht be halat TLS (websocket/443):  ratholenode noise off"
+  echo "$(c_y '──────────────────────────────────────────────────')"
+  echo "nokte: kelid-e omomi bala qabel-e enteshar ast; kelid-e khsvsi rooye Iran mimanad. firewall port $np/tcp bayad baz bashad."
+}
+
+# ---------- backhaul: core-e joda-ye Go (SMUX) posht-e nginx/443 (tak-port hefz mishavad) ----------
+ensure_backhaul_unit(){
+  [ -f "$BH_UNIT" ] && return 0
+  cat > "$BH_UNIT" <<UNIT
+[Unit]
+Description=backhaul server (SMUX core, Iran panel)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/backhaul-server -c ${BH_TOML}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload 2>/dev/null || true
+  log "unit-e $BH_SVC sakhte shod."
+}
+
+cmd_backhaul(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    on)
+      local port="${1:-}"; port="${port:-3080}"
+      echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      [ "$port" = "443" ] && die "port 443 rezerv ast; backhaul ru-ye 127.0.0.1 posht-e nginx gush midahad — port-e dakheli (masalan 3080) bede."
+      local transport="${2:-wsmux}" profile="${3:-balanced}" exposure="${4:-nginx_tls}"
+      backhaul_mux_profile "$profile" >/dev/null || die "profile namotabar (balanced|lossy|aggressive)."
+      case "$exposure" in nginx_tls|direct_ip) ;; *) die "mode bayad nginx_tls ya direct_ip bashad." ;; esac
+      [ "$exposure" = direct_ip ] && [ "$port" = 443 ] && die "direct-IP rooye 443 ba nginx tadakhol darad; port-e joda bede."
+      # transport be exposure vabaste ast:
+      #   nginx_tls → nginx TLS ra terminate mikonad va HTTP-e sade be 127.0.0.1 midahad، pas
+      #               server HATMAN bedoon-e TLS ast (ws/wsmux) va client-e node wss/wssmux mizanad.
+      #   direct_ip → hich nginx-i dar masir nist، pas KHOD-e backhaul bayad TLS ra terminate konad
+      #               (wss/wssmux ba gvahi-ye ip-cert). ws/wsmux ham mojaz ast vali BEDOON-e ramz.
+      # (tcpmux dar har do halat TCP-e kham ast va poshtibani nemishavad.)
+      case "${exposure}:${transport}" in
+        nginx_tls:ws|nginx_tls:wsmux|direct_ip:ws|direct_ip:wsmux|direct_ip:wss|direct_ip:wssmux) ;;
+        nginx_tls:wss|nginx_tls:wssmux)
+          die "dar halat-e nginx_tls transport-e server bayad bedoon-e TLS bashad — be jaye '${transport}' az '${transport/wss/ws}' estefade kon (TLS ru-ye nginx terminate mishavad va client-e node khodkar '${transport}' migirad)." ;;
+        *) die "transport-e ghabl-e qobul: nginx_tls → ws|wsmux ، direct_ip → ws|wsmux|wss|wssmux." ;;
+      esac
+      # direct_ip + TLS: gvahi-ye IP lazem ast. haman gvahi-ye `ratholectl ip-cert` estefade
+      # mishavad (yek anbar-e gvahi، na do ta). client-e backhaul gvahi ra verify NEMIKONAD
+      # (InsecureSkipVerify dar upstream)، pas self-signed bedoon-e trusted-root kar mikonad.
+      case "$transport" in
+        wss|wssmux)
+          local _fc _key
+          _fc="$(jq -r '.ip_tls.fullchain // empty' "$STATE" 2>/dev/null)"
+          _key="$(jq -r '.ip_tls.key // empty' "$STATE" 2>/dev/null)"
+          { [ -n "$_fc" ] && [ -n "$_key" ] && [ -f "$_fc" ] && [ -f "$_key" ]; } || \
+            die "baraye '${transport}' gvahi-ye IP lazem ast. aval ejra kon:  ratholectl ip-cert <IPv4>"
+          ;;
+      esac
+      install_backhaul server
+      # token-e moshterak: agar az ghabl dar state ast hefz, vagarna besaz (mesl control_path)
+      local token; token="$(jq -r '.backhaul_token // empty' "$STATE" 2>/dev/null)"
+      if [ -z "$token" ] || [ "$token" = null ]; then token="$(openssl rand -hex 20)"; fi
+      state_set '.backhaul_port' "$port" num
+      state_set '.backhaul_transport' "$transport" str
+      state_set '.backhaul_token' "$token" str
+      state_set '.backhaul_profile' "$profile" str
+      state_set '.backhaul_exposure' "$exposure" str
+      ensure_backhaul_unit
+      gen_backhaul_server_toml
+      systemctl enable "$BH_SVC" >/dev/null 2>&1 || true
+      if [ "$exposure" = "direct_ip" ]; then
+        case "$transport" in
+          wss|wssmux)
+            log "backhaul core faal shod: backhaul-server ru-ye 0.0.0.0:${port} (transport=${transport}, profile=${profile}, direct-IP + TLS-e self-signed)."
+            warn "gvahi self-signed ast va client-e backhaul an ra verify NEMIKONAD: ramz dar barabar-e shenod-e ghayr-faal bargharar ast، vali MITM-e faal daf nemishavad." ;;
+          *)
+            warn "backhaul direct-IP ba '${transport}' TLS NADARAD (token ham roo-ye sim mireh). baraye ramz: hamin dastoor ba 'wssmux'، ya nginx_tls/443، ya Noise."
+            log "backhaul core faal shod: backhaul-server ru-ye 0.0.0.0:${port} (transport=${transport}, profile=${profile}, direct-IP)." ;;
+        esac
+      else
+        log "backhaul core faal shod: backhaul-server ru-ye 127.0.0.1:${port} (transport=${transport}, profile=${profile}) — az nginx/443 obur miknd (/channel,/tunnel)."
+      fi
+      regenerate
+      systemctl restart "$BH_SVC" 2>/dev/null && log "$BH_SVC start shod." || err "start-e $BH_SVC nashod; log: journalctl -u $BH_SVC -n 30"
+      print_backhaul_connect
+      ;;
+    off)
+      # node-haye backhaul be transport-e pishfarz (ws az nginx/443) barmigardand — .transport hazf mishavad.
+      local tmp; tmp="$(mktemp)"
+      jq '(.nodes[] | select(.transport == "backhaul")) |= del(.transport)
+          | del(.backhaul_port,.backhaul_transport,.backhaul_token,.backhaul_profile,.backhaul_exposure)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      systemctl disable --now "$BH_SVC" 2>/dev/null || true
+      rm -f "$BH_UNIT"; systemctl daemon-reload 2>/dev/null || true
+      rm -f "$BH_TOML"
+      log "backhaul core khamoosh shod (rathole-backhaul-server hazf shod)."
+      regenerate
+      ;;
+    node)
+      local name="${1:-}" act="${2:-}"
+      echo "$name" | grep -qE '^[A-Za-z0-9_-]{1,40}$' || die "name-e node namotabar ast."
+      jq -e --arg n "$name" '.nodes[] | select(.name==$n)' "$STATE" >/dev/null 2>&1 || die "node '$name' peyda nashod."
+      case "$act" in
+        on)
+          local bp; bp="$(jq -r '.backhaul_port // empty' "$STATE" 2>/dev/null)"
+          [ -n "$bp" ] && [ "$bp" != null ] || die "aval backhaul ra roshan kon: ratholectl backhaul on [port]"
+          # transport-e har node YEKI ast (ws/noise/backhaul) — node-e noise ra sedaye khafi switch nakon.
+          local cur; cur="$(jq -r --arg n "$name" '.nodes[] | select(.name==$n) | .transport // "ws"' "$STATE" 2>/dev/null)"
+          [ "$cur" = noise ] && die "node '$name' rooye transport-e noise ast; aval 'ratholectl noise node $name off' ra bezan."
+          # GARD-e chand-mashini: backhaul 1:1 ast — YEK server + YEK token-e sarasari + YEK
+          # majmoue-ye 'ports'. agar DO mashin-e kharej ba haman token vasl shavand، sar-e
+          # channel-e kontrol ba ham daava mikonand va HAR DO ghat mishavand (na faghat dovomi).
+          # neshane-ash inbound-e YEKSAN beyn-e node-haye backhaul ast (yani do mashin ke har
+          # kodam haman service ra rooye haman port-e mahalli darand). rathole in moshkel ra
+          # nadarad chon har node token-e joda darad. GHABL az taghir-e state check mikonim.
+          local my_inb clash
+          my_inb="$(jq -r --arg n "$name" '.nodes[]|select(.name==$n)|.inbound_port' "$STATE" 2>/dev/null)"
+          clash="$(jq -r --arg n "$name" --argjson ib "${my_inb:-0}" \
+                   '[.nodes[]|select((.transport//"")=="backhaul" and .name!=$n and .inbound_port==$ib)|.name]
+                    | join(", ")' "$STATE" 2>/dev/null)"
+          if [ -n "$clash" ] && [ "$clash" != null ]; then
+            err "node '$name' inbound-e ${my_inb} darad ke node-e backhaul-e digari ham hamin ra darad: ${clash}"
+            err "backhaul 1:1 ast — faghat YEK mashin-e kharej mitavanad rooye backhaul bashad."
+            err "do mashin ba yek token → har DO tunnel ghat mishavad."
+            die "baraye in node az rathole estefade kon (ws/kcp/plain/noise)، ya aval '${clash}' ra backhaul off kon."
+          fi
+          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "backhaul"' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          log "node '$name' be backhaul switch shod (az rathole-server kharej shod)."
+          regenerate
+          print_backhaul_connect
+          ;;
+        off)
+          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="backhaul")) |= del(.transport)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          log "node '$name' be transport-e pishfarz (ws az nginx/443) bargasht."
+          regenerate
+          ;;
+        *) die "estefade: ratholectl backhaul node <name> <on|off>" ;;
+      esac
+      ;;
+    status)
+      local bp; bp="$(jq -r '.backhaul_port // empty' "$STATE" 2>/dev/null)"
+      if [ -n "$bp" ] && [ "$bp" != null ]; then
+        local tr ctr prof cnt nlist exposure bind label
+        tr="$(jq -r '.backhaul_transport // "wsmux"' "$STATE" 2>/dev/null)"
+        exposure="$(jq -r '.backhaul_exposure // "nginx_tls"' "$STATE" 2>/dev/null)"
+        if [ "$exposure" = "direct_ip" ]; then ctr="$tr"; bind="0.0.0.0"; label="direct-IP bedoon TLS"; else ctr="$(backhaul_client_transport "$tr")"; bind="127.0.0.1"; label="az nginx/443"; fi
+        prof="$(jq -r '.backhaul_profile // "balanced"' "$STATE" 2>/dev/null)"
+        cnt="$(jq -r '[.nodes[] | select(.transport=="backhaul")] | length' "$STATE" 2>/dev/null)"
+        echo "backhaul (SMUX core): $(c_g 'roshan')  backhaul-server ru-ye ${bind}:${bp} (server=${tr} / client=${ctr}, profile=${prof}, ${label})  (node-ha: ${cnt:-0})"
+        nlist="$(jq -r '[.nodes[] | select(.transport=="backhaul") | .name] | join(", ")' "$STATE" 2>/dev/null)"
+        [ -n "$nlist" ] && echo "  node-haye backhaul: $nlist"
+        command -v ss >/dev/null 2>&1 && { ss -ltnH "sport = :$bp" 2>/dev/null | grep -q . && echo "  gvshdadn 127.0.0.1:$bp: $(c_g 'blh')" || echo "  gvshdadn 127.0.0.1:$bp: $(c_r 'khir')"; }
+        command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet "$BH_SVC" && echo "  $BH_SVC: $(c_g 'active')" || echo "  $BH_SVC: $(c_r 'inactive')"; }
+      else
+        echo "backhaul (SMUX core): $(c_y 'khamoosh')"
+      fi
+      ;;
+    show) print_backhaul_connect ;;
+    logs)
+      journalctl -u "$BH_SVC" -n "${1:-40}" --no-pager 2>/dev/null || true
+      ;;
+    *) die "estefade: ratholectl backhaul <on [port] [transport] [profile] [nginx_tls|direct_ip]|off|node <name> on|off|status|show|logs>" ;;
+  esac
+}
+
+# ---------- reverse-proxy-e gheyre-tunnel (baraye tunnel/service-haye kastom) ----------
+# yek masir /<name>/ rooye haman 443 misazad ke be yek upstream-e delkhah proxy mikonad —
+# bedoon-e obur az rathole. baraye vaghti ke khodet yek tunnel/service-e mostaghel dari
+# va mikhahi az haman domain/gvahi serve shavad.
+#
+# AMNIAT: upstream faghat 'http(s)://host:port' ast — bedoon masir، bedoon query va bedoon
+# hich metachar-e shl/nginx. in mane-e tazrigh be conf mishavad. khod-e maghsad "e'temad-shode"
+# farz mishavad (aperator anra entekhab mikonad).
+cmd_proxy(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-ls}"; shift || true
+  case "$sub" in
+    add)
+      local name="${1:-}" up="${2:-}"
+      [ -n "$name" ] && [ -n "$up" ] || die "estefade: ratholectl proxy add <name> <http(s)://host:port>"
+      echo "$name" | grep -qE '^[A-Za-z0-9_-]{1,40}$' || die "name faghat harf/adad/_/- va hadaksar 40 karakter."
+      # nam-haye rezerv: masir-haye sabet-e nginx
+      case "$name" in sub|hub|channel|tunnel) die "esm '$name' rezerv ast (masir-e sabet-e nginx)." ;; esac
+      echo "$up" | grep -qE '^https?://[A-Za-z0-9._-]{1,255}:[0-9]{1,5}$' \
+        || die "upstream bayad daghighan be shekl http://host:port ya https://host:port bashad (bedoon masir)."
+      jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
+        && die "esm '$name' motealegh be yek node ast (har do dar map-e /<name> mineshinand)."
+      jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
+        && die "reverse-proxy '$name' az ghabl vojood darad."
+      local tmp; tmp="$(mktemp)"
+      jq --arg n "$name" --arg u "$up" \
+         '.proxies = ((.proxies // []) + [{name:$n, upstream:$u}])' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      log "reverse-proxy ezafe shod: /${name}/ → ${up}"
+      regenerate
+      local domain; domain="$(s_get '.domain')"
+      echo "masir-e karbar: https://${domain:-<DOMAIN>}/${name}/"
+      ;;
+    rm)
+      local name="${1:-}"
+      [ -n "$name" ] || die "estefade: ratholectl proxy rm <name>"
+      jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
+        || die "reverse-proxy '$name' peyda nashod."
+      local tmp; tmp="$(mktemp)"
+      jq --arg n "$name" '.proxies = ((.proxies // []) | map(select(.name != $n)))' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      log "reverse-proxy hazf shod: $name"
+      regenerate
+      ;;
+    ls)
+      local cnt; cnt="$(jq -r '(.proxies // []) | length' "$STATE" 2>/dev/null)"
+      if [ "${cnt:-0}" -eq 0 ]; then
+        echo "(hich reverse-proxy-i tarif nashode) — ezafe: ratholectl proxy add <name> <http://host:port>"
+        return 0
+      fi
+      local domain; domain="$(s_get '.domain')"
+      printf '%-16s %-32s %s\n' "NAME" "UPSTREAM" "USER URL"
+      printf '%s\n' "--------------------------------------------------------------------"
+      jq -r '.proxies[] | [.name, .upstream] | @tsv' "$STATE" 2>/dev/null |
+      while IFS=$'\t' read -r pn pu; do
+        pu="${pu%$'\r'}"
+        printf '%-16s %-32s %s\n' "$pn" "$pu" "https://${domain:-<DOMAIN>}/${pn}/"
+      done
+      ;;
+    *) die "estefade: ratholectl proxy <add <name> <http(s)://host:port>|rm <name>|ls>" ;;
+  esac
+}
+
+print_backhaul_connect(){
+  local bp token tr ctr prof domain exposure ip target
+  bp="$(jq -r '.backhaul_port // empty' "$STATE" 2>/dev/null)"
+  [ -n "$bp" ] && [ "$bp" != null ] || { warn "backhaul khamoosh ast; aval: ratholectl backhaul on [port]"; return; }
+  token="$(jq -r '.backhaul_token // empty' "$STATE" 2>/dev/null)"
+  tr="$(jq -r '.backhaul_transport // "wsmux"' "$STATE" 2>/dev/null)"
+  exposure="$(jq -r '.backhaul_exposure // "nginx_tls"' "$STATE" 2>/dev/null)"
+  if [ "$exposure" = "direct_ip" ]; then ctr="$tr"; ip="$(detect_ip)"; target="${ip:-<IRAN_IP>}:$bp"; else ctr="$(backhaul_client_transport "$tr")"; domain="$(jq -r '.domain // empty' "$STATE" 2>/dev/null)"; target="${domain:-<DOMAIN>}"; fi
+  prof="$(jq -r '.backhaul_profile // "balanced"' "$STATE" 2>/dev/null)"
+  echo
+  echo "$(c_y '──────── faalsazi backhaul (SMUX core) rooye node kharej ────────')"
+  if [ "$exposure" != "direct_ip" ]; then
+    echo "rooye node in ra bezan (tunnel-e mux az haman domain/443 obur miknd):"
+  else
+    case "$tr" in
+      wss|wssmux) echo "rooye node in ra bezan (direct-IP + TLS-e self-signed rooye khod-e backhaul):" ;;
+      *)          echo "rooye node in ra bezan (direct-IP, BEDOON TLS):" ;;
+    esac
+  fi
+  echo "  ratholenode backhaul on ${target} ${token:-<TOKEN>} ${ctr} ${prof}"
+  echo
+  echo "khamoosh kardan:  ratholenode backhaul off"
+  echo "$(c_y '──────────────────────────────────────────────────')"
+  echo "nokte: token moshterak ast va secret — fght be node-haye backhaul bede. mode=${exposure}."
+  if [ "$exposure" = direct_ip ]; then
+    case "$tr" in
+      wss|wssmux) echo "nokte: gvahi self-signed ast va client an ra verify nemikonad — ramz dar barabar-e shenod-e ghayr-faal hast، MITM-e faal na." ;;
+      *)          echo "HOSHDAR: '${tr}' direct-IP TLS NADARAD؛ baraye ramz haman dastoor ba 'wssmux'، ya nginx_tls/443، ya Noise." ;;
+    esac
+  fi
+  echo "nokte: profile ('${prof}') bayad DAR HAR DO taraf yeksan bashad vagarna parametrhaye SMUX nemikhanand."
+}
+
+# ---------- probe-e HTTP/WS ba timeout-e SAKHT (hich vaght hang nemikonad) ----------
+# CHERA timeout EJBARI ast: vaghti control-channel SALEM ast, nginx `101 Switching Protocols`
+# midahad va connection be yek tunnel-e do-tarafe tabdil mishavad ke HARGEZ baste nemishavad.
+# curl (ke websocket nemifahmad) montazer-e body-i mimanad ke nemiayad → `doctor` DAGHIGHAN
+# vaghti hame chiz DOROST ast baraye hamishe hang mikonad. ta ghabl az v1.6.2 in penhan bood
+# chon bedoon-e --http1.1 curl h2 mozakere mikard، nginx header-e Upgrade ra mindakht va
+# javab-e sari-e 200-e sait-e fik migereft (haman bug-e "false 200").
+# ba --max-time transfer ghat mishavad AMMA kod-e HTTP-e header-e daryaft-shode hefz mishavad.
+RTH_PROBE_T="${RTH_PROBE_TIMEOUT:-3}"
+rth_probe(){ # $1=url  $2=domain  $3...=header-haye ezafe  → kod HTTP (ya 000)
+  local url="$1" dom="$2"; shift 2
+  local code
+  code="$(curl -s --http1.1 --connect-timeout 3 --max-time "$RTH_PROBE_T" \
+          -o /dev/null -w '%{http_code}' -k "$@" \
+          "$url" --resolve "$dom:443:127.0.0.1" 2>/dev/null)"
+  # TALE: inja `|| echo 000` NAZAN. curl ba --max-time kod-e khorooji 28 midahad DAR HALI KE
+  # '101' ra ham chap karde — natije "101000" mishavad va hich vaght ba 101 barabar nist.
+  case "$code" in ''|*[!0-9]*) code=000 ;; esac
+  printf '%s' "$code"
+}
+
+# ---------- doctor: barresi slamt ----------
+cmd_doctor(){
+
+  need_bin jq; ensure_state
+  local domain ctrl fake ok=0 bad=0
+  domain="$(s_get '.domain')"; ctrl="$(s_get '.control_port')"; fake="$(s_get '.fake_port')"
+  chk(){ if eval "$2" >/dev/null 2>&1; then printf '  %s %s\n' "$(c_g 'OK ')" "$1"; ok=$((ok+1)); else printf '  %s %s\n' "$(c_r 'FAIL')" "$1"; bad=$((bad+1)); fi; }
+
+  echo "$(c_g '== barresi serviceha ==')"
+  chk "rathole-server faal ast"        "systemctl is-active --quiet $RATHOLE_SVC"
+  chk "nginx faal ast"                  "systemctl is-active --quiet nginx"
+  chk "config nginx motabar ast (nginx -t)" "nginx -t"
+
+  echo "$(c_g '== barresi pvrthai lvkal ==')"
+  chk "kntrl rathole rooye 127.0.0.1:$ctrl gvsh midahad" \
+      "ss -ltnH 'sport = :$ctrl' | grep -q ."
+  chk "sait fik rooye 127.0.0.1:$fake gvsh midahad" \
+      "ss -ltnH 'sport = :$fake' | grep -q ."
+  jq -r '.nodes[] | [.name,(.port|tostring)] | @tsv' "$STATE" |
+  while IFS=$'\t' read -r n p; do
+    if ss -ltnH "sport = :$p" | grep -q .; then
+      printf '  %s node %s rooye port %s amade ast\n' "$(c_g 'OK ')" "$n" "$p"
+    else
+      printf '  %s node %s rooye port %s gvsh nmidhd (klaint node vsl nist?)\n' "$(c_y 'WARN')" "$n" "$p"
+    fi
+  done
+
+  # backhaul 1:1 ast: inbound-e tekrari beyn-e node-haye backhaul yani chand MASHIN-e kharej
+  # dar yek namespace → mis-routing/timeout (khososan gRPC). inja loo midahim.
+  local bh_dup
+  bh_dup="$(jq -r '[.nodes[]|select((.transport//"")=="backhaul")|.inbound_port]
+            | group_by(.) | map(select(length>1)) | flatten | unique | join(",")' "$STATE" 2>/dev/null)"
+  if [ -n "$bh_dup" ] && [ "$bh_dup" != null ]; then
+    echo "$(c_g '== barresi backhaul ==')"
+    printf '  %s node-haye backhaul inbound-e tekrari darand (port: %s)\n' "$(c_r 'FAIL')" "$bh_dup"
+    printf '       backhaul 1:1 ast — faghat YEK mashin-e kharej mitavanad rooye backhaul bashad.\n'
+    bad=$((bad+1))
+  fi
+
+  echo "$(c_g '== tst tmaiz sait fik / channel kontroli (az rooye hamin server) ==')"
+  if command -v curl >/dev/null 2>&1; then
+    local root_code ws_root ws_cp cp
+    # control_path-e makhfi (/_rh/<hex>) az state; agar nabashad '/' (fallback-e rishh).
+    cp="$(jq -r '.control_path // "/"' "$STATE" 2>/dev/null)"; [ -n "$cp" ] || cp="/"
+    local wsh=(-H 'Connection: Upgrade' -H 'Upgrade: websocket'
+               -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==')
+    # MOHEM: --http1.1 EJBARI ast. bedoon-e an curl mitavanad HTTP/2 mozakere konad va
+    # nginx header-e Upgrade ra dar h2 hazf mikonad → map be default (sait-e fik) miravad →
+    # kod-e 200-e DOROUGHI (dar hali ke tunnel salem ast). in daghighan bug-e ghadimi bood.
+    # timeout dakhel-e rth_probe ast (tunnel-e salem connection ra baz negah midarad).
+    root_code="$(rth_probe "https://$domain/" "$domain")"
+    echo "  drkhvast aadi be / → kd HTTP: $(c_y "$root_code") (bayad sait fik/panel ra bdhd)"
+    ws_root="$(rth_probe "https://$domain/" "$domain" "${wsh[@]}")"
+    echo "  websocket be / (fallback) → kd HTTP: $(c_y "$ws_root") (101=rthvl, ghir an=be fik rfth)"
+    # channel-e VAGHEI ke node be an vasl mishavad: masir-e makhfi. 101 inja = salem.
+    if [ "$cp" != "/" ]; then
+      ws_cp="$(rth_probe "https://$domain${cp}" "$domain" "${wsh[@]}")"
+      if [ "$ws_cp" = 101 ]; then
+        printf '  %s control-path WS (%s) → 101 (kontrol salem)\n' "$(c_g 'OK ')" "$cp"; ok=$((ok+1))
+      else
+        printf '  %s control-path WS (%s) → %s (entezar 101)\n' "$(c_r 'FAIL')" "$cp" "$ws_cp"; bad=$((bad+1))
+      fi
+    fi
+  else
+    warn "curl nasb nist; tst HTTP rad shod."
+  fi
+  echo
+  echo "$(c_g "khlash:") OK=$ok  FAIL=$bad"
+}
+
+# ---------- logs: jam-avari-ye HAME chiz baraye eshkal-zodai ----------
+# estefade: ratholectl logs [tedad-khat] [--bundle]
+#   --bundle : khorooji ra dar yek file-e .txt.gz mizarad ta ba scp bardari
+# hameye token/kelid-ha ba rth_redact (common.sh) hazf mishavand — khorooji ghabel-e
+# eshterak-gozari ast. bara-ye khorooji-ye kham: hich — amdan rah nadarad.
+_logs_body(){
+  local n="$1" nconf
+  nconf="$(s_get '.nginx_conf' 2>/dev/null)"; case "$nconf" in ''|null) nconf="$NGINX_CONF" ;; esac
+
+  rth_sec "kolli"
+  printf 'tarikh      : %s\n' "$(date -Is 2>/dev/null)"
+  printf 'hostname    : %s\n' "$(hostname 2>/dev/null)"
+  printf 'naghsh      : panel (Iran)\n'
+  printf 'kernel      : %s\n' "$(uname -sr 2>/dev/null)"
+  printf 'os          : %s\n' "$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+  printf 'ratholectl  : %s\n' "$(print_version panel 2>/dev/null | head -1)"
+  printf 'rathole     : %s\n' "$(/usr/local/bin/rathole --version 2>/dev/null || echo 'nist')"
+  printf 'nginx       : %s\n' "$(nginx -v 2>&1 || echo 'nist')"
+  printf 'uptime      : %s\n' "$(uptime -p 2>/dev/null)"
+
+  rth_sec "vaziat (status)"
+  cmd_status 2>&1 | rth_redact || true
+
+  rth_sec "barresi slamt (doctor)"
+  cmd_doctor 2>&1 | rth_redact || true
+
+  # ---- service-ha ----
+  local u
+  for u in "$RATHOLE_SVC" nginx ratholehub "$NOISE_SVC" "$BH_SVC" \
+           rathole-kcp-server "$PANEL_FAKEWEB_SVC"; do
+    rth_unit_log "$u" "$n"
+  done
+
+  rth_sec "nginx -t"
+  nginx -t 2>&1 | rth_redact || true
+  rth_sec "nginx error.log (akharin $n khat)"
+  tail -n "$n" /var/log/nginx/error.log 2>/dev/null | rth_redact || echo "(nist)"
+
+  rth_sec "port-haye baz (ss -ltnp)"
+  ss -ltnp 2>/dev/null | rth_redact || true
+
+  # ---- config-ha (redact-shode) ----
+  rth_file_dump "state.json"           "$STATE"        400
+  rth_file_dump "server.toml"          "$SERVER_TOML"  300
+  rth_file_dump "nginx rathole.conf"   "$nconf"        400
+  rth_file_dump "nginx upgrade-map"    "/etc/nginx/conf.d/rathole-upgrade-map.conf" 40
+  rth_file_dump "noise-server.toml"    "$NOISE_TOML"   120
+  rth_file_dump "backhaul-server.toml" "$BH_TOML"      120
+  rth_file_dump "nginx stream (SNI)"   "$STREAM_CONF"  200
+
+  rth_sec "payan"
+}
+
+cmd_logs(){
+  need_bin jq; ensure_state
+  local n=80 bundle=0 a
+  for a in "$@"; do
+    case "$a" in
+      --bundle) bundle=1 ;;
+      ''|*[!0-9]*) : ;;
+      *) n="$a" ;;
+    esac
+  done
+  if [ "$bundle" -eq 1 ]; then
+    local out; out="/tmp/rathole-logs-$(hostname -s 2>/dev/null || echo panel)-$(date +%Y%m%d-%H%M%S).txt.gz"
+    _logs_body "$n" 2>&1 | gzip -c > "$out" || die "sakht-e bundle shekast khord."
+    chmod 600 "$out"
+    log "bundle-e log sakhte shod: $out  ($(du -h "$out" 2>/dev/null | cut -f1))"
+    echo "  bardashtan az system-e khodet:  scp root@$(s_get '.domain'):$out ."
+  else
+    _logs_body "$n"
+  fi
+}
+
+# ---------- mnvi taamoli ----------
+menu(){
+  while true; do
+    echo
+    echo "$(c_g '==== rathole-manager ====')"
+    if [ -f "$STATE" ]; then
+      echo " damnh: $(c_y "$(s_get '.domain')")   tadad node: $(c_y "$(jq '.nodes|length' "$STATE")")"
+    else
+      echo " $(c_r 'hnvz init nashode')"
+    fi
+    echo " 1) init / tanzimat avlih"
+    echo " 2) afzoodan node"
+    echo " 3) hazf node"
+    echo " 4) list nodeha"
+    echo " 5) baztolid config va reload"
+    echo " 6) chap dstvr nasb yek node"
+    echo " 7) vzait serviceha"
+    echo " 8) barresi slamt (doctor)"
+    echo " 9) virayesh node (inbound/mdirit)"
+    echo "10) chrkhsh token node"
+    echo "11) taghir tanzimat srasri"
+    echo "12) jam-avari-ye log (baraye ferestadan be poshtiban)"
+    echo " 0) khorooj"
+    # rth_read (na `read -rp`-e barhne): bedoon-e tty meghdar-e khali barmigardad va halghe
+    # BI-NAHAYAT «gzinh namotabar» chap mikard (spin-e CPU). pas bedoon-e tty foran khárej sho.
+    rth_read ch "entekhab: "
+    if [ -z "$ch" ] && ! has_tty; then err "menu be tty niaz darad (bedoon-e terminal ejra shode)."; exit 1; fi
+    case "$ch" in
+      1) cmd_init ;;
+      2) rth_read n "name node: "; rth_read ib "port inbound Xray rooye node: "
+         rth_read ap "port API node (khali=bedoon mdirit): "
+         if [ -n "$ap" ]; then cmd_add "$n" "$ib" "$ap"; else cmd_add "$n" "$ib"; fi ;;
+      3) rth_read n "name node baraye hazf: "; cmd_rm "$n" ;;
+      4) cmd_ls ;;
+      5) regenerate ;;
+      6) rth_read n "name node: "; print_node_install "$n" ;;
+      7) systemctl --no-pager status "$RATHOLE_SVC" nginx | sed -n '1,12p' || true ;;
+      8) cmd_doctor ;;
+      12) cmd_logs --bundle ;;
+      9) rth_read n "name node: "; rth_read ib "inbound jadid (khali=bedoon taghir): "
+         rth_read ap "port mdirit jadid (off=khamvsh, khali=bedoon taghir): "
+         args=("$n"); [ -n "$ib" ] && args+=(--inbound "$ib"); [ -n "$ap" ] && args+=(--api-port "$ap")
+         cmd_edit "${args[@]}" ;;
+      10) rth_read n "name node: "; cmd_rotate "$n" ;;
+      11) rth_read k "kelid (domain/fake-port/...): "; rth_read v "meghdar: "; cmd_set "$k" "$v" ;;
+      0) exit 0 ;;
+      *) err "gzinh namotabar." ;;
+    esac
+  done
+}
+
+# beroozresani-e kamel az GitHub (akharin Release): install.sh ra migirad va --update mizanad.
+# install.sh khodesh snapshot + health-check + rollback-e khodkar ra (az tarigh bootstrap→update.sh) ejra mikonad.
+# mirror-haye ghproxy baraye dor-zadan-e filtering-e Iran (hamsan-e install-panel.sh).
+cmd_update(){
+  need_root
+  command -v curl >/dev/null 2>&1 || die "curl lazem ast (apt install -y curl)."
+  local gh="${RATHOLE_GH:-loopy-iri/RatholeEngine}" rel="${RATHOLE_RELEASE:-latest}"
+  # 'ratholectl update beta' → kanal-e pre-release. chon releases/latest/download pre-release ha
+  # ra nadide migirad, aval bayad tag-e daghigh ra az atom peyda konim.
+  case "${1:-}" in
+    beta)
+      log "peyda kardan-e akharin noskhe-ye beta..."
+      rel="$(resolve_beta_tag "$gh")" || die "hich noskhe-ye beta-i montasher nashode (ya dastresi be GitHub nist)."
+      warn "kanal-e BETA: $rel — in noskhe azmayeshi ast va momken ast paydar nabashad."
+      ;;
+    stable|latest|'') ;;
+    v[0-9]*|[0-9]*) rel="$1" ;;   # pin-e sarih: ratholectl update v1.8.0
+    *) die "estefade: ratholectl update [beta|stable|vX.Y.Z]" ;;
+  esac
+  # tag dar URL miayad — etebar-sanji kon (jelogiri az path-traversal/tazrigh dar masir).
+  [ "$rel" = "latest" ] || printf '%s' "$rel" | grep -qE '^[0-9A-Za-z._-]+$' \
+    || die "tag-e noskhe namotabar: '$rel'."
+  local path; if [ "$rel" = "latest" ]; then path="releases/latest/download/install.sh"; else path="releases/download/${rel}/install.sh"; fi
+  local mirrors=("" "https://ghproxy.net/" "https://gh-proxy.com/" "https://mirror.ghproxy.com/")
+  local tmp m ok=0; tmp="$(mktemp)"
+  log "download install.sh az GitHub Release: $gh ($rel)..."
+  for m in "${mirrors[@]}"; do
+    if curl -fSL --retry 2 --connect-timeout 20 "${m}https://github.com/${gh}/${path}" -o "$tmp" 2>/dev/null; then ok=1; break; fi
+    [ -n "$m" ] && warn "in mirror javab nadad, badi..."
+  done
+  [ "$ok" -eq 1 ] || { rm -f "$tmp"; die "download install.sh az hameye mirror-ha shekast khord (filtering/slug/release ra barresi kon)."; }
+  log "ejra-ye update-e kamel (snapshot + health-check + rollback-e khodkar)..."
+  RATHOLE_GH="$gh" RATHOLE_RELEASE="$rel" bash "$tmp" --update
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+usage(){
+  cat <<USAGE
+ratholectl — mdirit tunnel rathole mvltilvkishn
+
+dstvrha:
+  init                         tanzim damnh/gvahi/portha
+  add <name> <inbound> [api]   afzoodan node (api = port mdirit ekhtiari)
+  rm <name>                    hazf node
+  ls                           list nodeha
+  set <key> <value>            taghir tanzimat srasri (domain/fullchain/key/nginx-conf/fake-port/sub-port/control-port/sub-path/hub-path)
+  info                         namayesh damnh/gvahi/enghza va damnhhai SNI (baraye panel)
+  status [--json]              dashboard-e kamel: port-ha/halat-ha/service-ha/node-ha (mesl-e panel-e VPN)
+  paths                        namayesh masir-e hameye config-ha va file-ha (ba alamat-e vojood)
+  cert <domain> [email]        grftn gvahi Let's Encrypt + tanzim damnh asli (ghir-taamoli)
+  ip-cert <IPv4> [days]        WSS rooye IP ba gvahi self-signed-e IP-SAN (domain-e asli hefz mishavad)
+  ip-cert-show [IPv4]          chap public cert baraye trust rooye node
+  ip-cert-off                  khamoosh-kardan vhost-e IP TLS (file-e cert/key hefz mishavad)
+
+  edit <name> [--inbound N] [--api-port N|off]   virayesh yek node
+  rename <old> <new>           taghir name/masir node
+  rotate <name>                chrkhsh token(ha)i node
+  show <name>                  namayesh jzyiat va dstvr nasb node
+  regen                        baztolid configha va reload
+  backup [file]                sakht backup az state (nodeha/tokenha)
+  restore <file>               restore az backup + baztolid
+  token <name>                 chap dstvr nasb node (curl yek-khatti + install-node.sh)
+  doctor                       barresi slamt system va tmaiz sait fik/rthvl
+  logs [n] [--bundle]          log-e HAME chiz (service-ha + nginx + config-ha + doctor) — token-ha redact mishavand; --bundle = file-e .txt.gz baraye scp
+  tune                         eemal BBR + limithaye system/nginx (rfa 502 zir burst)
+  fakeweb <start|stop|rm|status> [port]   sait fik pishfarz rooye fake_port (rfa 502 rooye / dar srvrhai rlh)
+  hub <on [port]|off|status>   panel web psht nginx zir haman damnh (masir pishfarz /hub/ — ba `set hub-path` avaz mishavad); bar-e aval hub ra khodkar nasb mikonad, baad faghat port avaz mikonad
+  kcp <on [port] [profile]|off|status|show>   tunnel UDP+FEC ba estetar (port 443=QUIC; profile: balanced/lossy/aggressive)
+  plain <on [port]|off|status|show>   tunnel-e websocket bedoon-e TLS (listener HTTP rooye port jda, masalan 8880)
+  noise <on [port]|off|node <name> on|off|status|show>   tunnel-e ramznegari-shode (Noise) rooye instans-e dovom (bedoon TLS/cert, port omomi masalan 2334)
+  backhaul <on [port] [transport] [profile] [mode]|off|node <name> on|off|status|show>   core-e backhaul (SMUX). profile: balanced/lossy/aggressive (bayad DO taraf yeksan bashad)
+                               mode=nginx_tls (pishfarz): posht-e nginx/443، tak-port hefz — transport-e server ws|wsmux (bedoon TLS، client khodkar wss/wssmux migirad)
+                               mode=direct_ip: bedoon-e nginx roo-ye 0.0.0.0:<port> — ws|wsmux (bedoon ramz) ya wss|wssmux (TLS-e self-signed، aval: ratholectl ip-cert <IPv4>)
+  proxy <add <name> <http(s)://host:port>|rm <name>|ls>   reverse-proxy-e gheyre-tunnel: /<name>/ rooye haman 443 be yek upstream-e delkhah (baraye tunnel/service-haye kastom)
+  game add <name> <inbound> <sni>   service game (SNI rooye 443, TLS rooye node)
+
+  game rm <name> | ls | show <name> | cert <sni>   mdirit service game va gvahi
+  restart                      restart kamel rathole-server (tunnelha lhzhai ghat)
+  enable                       faalsazi va start rathole-server
+  update [beta|stable|vX.Y.Z]  beroozresani-e kamel az GitHub (snapshot + rollback-e khodkar). 'beta' = akharin pre-release؛ tag = noskhe-ye khas
+  version                      chap-e noskhe-ye manager + rathole
+  menu                         mnvi taamoli (pishfarz)
+USAGE
+}
+
+# ---------- control-path: namayesh va rotate-e masir-e makhfi WebSocket ----------
+cmd_control_path(){
+  local sub="${1:-show}"; shift || true
+  need_bin jq; ensure_state
+  case "$sub" in
+    show)
+      local p; p="$(jq -r '.control_path // empty' "$STATE" 2>/dev/null)"
+      [ -n "$p" ] && echo "control_path=$p" || echo "control_path=(set nashode — aval init ya regen bezan)"
+      ;;
+    rotate)
+      need_root
+      local old new
+      old="$(jq -r '.control_path // empty' "$STATE" 2>/dev/null)"
+      new="/_rh/$(openssl rand -hex 16)"
+      # masir-e ghabli ra baraye yek dore-ye gozar zakhire mikonim ta node-haye dar-hal-update ghat nakonand
+      state_set '.control_path_previous' "${old:-}" str
+      state_set '.control_path' "$new" str
+      regenerate
+      log "control-path rotate shod: $old → $new"
+      warn "hame-ye node-haye vasl-ra ba dastoor-e zir berooz kon:"
+      warn "  ratholenode set SERVER <panel-domain>:443  # ya az hub update bezan"
+      echo "new_control_path=$new"
+      ;;
+    *) die "estefade: ratholectl control-path show|rotate" ;;
+  esac
+}
+
+main(){
+  local cmd="${1:-menu}"; shift || true
+  case "$cmd" in
+    init)   cmd_init "$@" ;;
+    add)
+      # aval flg-ha ra jodkon, sps positional-ha (name inbound) — ta `add name --api-port N`
+      # eshtebahan inbound='--api-port' nashavad.
+      local api="" pos=()
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --api-port) api="${2:-}"; shift 2 || shift;;
+          *) pos+=("$1"); shift;;
+        esac
+      done
+      cmd_add "${pos[0]:-}" "${pos[1]:-}" "$api" ;;
+    rm)     cmd_rm "${1:-}" ;;
+    ls)     cmd_ls ;;
+    set)    cmd_set "${1:-}" "${2:-}" ;;
+    info)   cmd_info ;;
+    status) cmd_status "${1:-}" ;;
+    paths)  cmd_paths ;;
+    cert)   cmd_cert "${1:-}" "${2:-}" ;;
+    ip-cert) cmd_ip_cert "${1:-}" "${2:-}" ;;
+    ip-cert-show) cmd_ip_cert_show "${1:-}" ;;
+    ip-cert-off) cmd_ip_cert_off ;;
+    certs)  cmd_certs ;;
+    domain) cmd_domain "$@" ;;
+    recover) cmd_recover ;;
+    edit)   cmd_edit "$@" ;;
+
+    rename) cmd_rename "${1:-}" "${2:-}" ;;
+    rotate) cmd_rotate "${1:-}" ;;
+    show)   cmd_show "${1:-}" ;;
+    regen)  regenerate ;;
+    backup) cmd_backup "${1:-}" ;;
+    restore) cmd_restore "${1:-}" ;;
+    token)  print_node_install "${1:-}" ;;
+    doctor) cmd_doctor ;;
+    logs)   cmd_logs "$@" ;;
+    tune)   cmd_tune ;;
+    fakeweb) cmd_fakeweb "${1:-}" "${2:-}" ;;
+    hub)    cmd_hub "${1:-}" "${2:-}" ;;
+    kcp)    cmd_kcp "$@" ;;
+    plain)  cmd_plain "${1:-}" "${2:-}" ;;
+    direct) cmd_direct "$@" ;;
+    noise)  cmd_noise "$@" ;;
+    backhaul) cmd_backhaul "$@" ;;
+    proxy)  cmd_proxy "$@" ;;
+
+    control-path) cmd_control_path "${1:-show}" "$@" ;;
+    game)   cmd_game "$@" ;;
+    restart) need_root; systemctl restart "$RATHOLE_SVC" && log "$RATHOLE_SVC restart shod (hame tunnelha lhzhai ghat shdnd)." ;;
+    enable) need_root; systemctl enable --now "$RATHOLE_SVC"; log "$RATHOLE_SVC faal shod." ;;
+    update) cmd_update "${1:-}" ;;
+    version|--version|-V) print_version panel ;;
+    menu)   menu ;;
+    -h|--help|help) usage ;;
+    *) err "dstvr nashenakhte: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+# ---------- ghofl-e state (jelogiri az lost-update / TOCTOU) ----------
+# CHERA: hub yek ThreadingHTTPServer ast va mitavanad chand action ra HAMZAMAN rooye yek
+# server ejra konad (masalan chand click-e 'add node'). alghoye har mutator in ast:
+#   next_port -> jq mikhanad ... -> jq minevisad
+# beyn-e KHANDAN va NEVESHTAN yek process-e digar mitavanad haman port ra bardarad ya
+# hamon state ra bazneveshte konad. dar amal (test-e vaghei ba 4 'add'-e hamzaman):
+# az 4 node faghat 2 ta mand va HAR DO port-e 1001 gereftand → do bind_addr-e yeksan.
+# rah-e hal: KOL-e dastoor zir yek ghofl-e sarasari. dastoor-haye faghat-khandani
+# (ls/status/show/...) ham ghofl migirand — arzan ast va sadegi mohem-tar.
+# fallback-e mkdir baraye sistem-haye bedoon-e flock (hamsan-e rth_commit_config).
+RTH_LOCK="/run/ratholectl.lock"
+rth_with_lock(){
+  mkdir -p "$(dirname "$RTH_LOCK")" 2>/dev/null || RTH_LOCK="/tmp/ratholectl.lock"
+  if command -v flock >/dev/null 2>&1; then
+    # BEHRANI: `exec 9>file 2>/dev/null` (bedoon-e command) redirect ra DAEMI mikonad —
+    # yaani stderr-e KOL-e process ta akhar be /dev/null miraft va HAMEYE payam-haye
+    # err/die BI-SEDA gom mishodand (masalan rahnama-ye «--domain bede» dar init: karbar
+    # faghat «init shekast khord» ra midid). ba group، 2>/dev/null faghat baraye hamin
+    # exec eemal mishavad va fd 9 ham hamchenan set mishavad.
+    { exec 9>"$RTH_LOCK"; } 2>/dev/null || { "$@"; return $?; }
+    if flock -w 30 9; then RTH_LOCK_HELD=1
+    else warn "ghofl-e state azad nashod (30s); edame midaham."; fi
+    "$@"; local rc=$?
+    RTH_LOCK_HELD=0
+    exec 9>&-
+    return $rc
+  fi
+  local d="${RTH_LOCK}.d" i=0 held=0
+  while [ "$i" -lt 300 ]; do
+    if mkdir "$d" 2>/dev/null; then held=1; break; fi
+    i=$((i+1)); sleep 0.1 2>/dev/null || sleep 1
+  done
+  [ "$held" -eq 1 ] || warn "ghofl-e state azad nashod (timeout); edame midaham."
+  "$@"; local rc=$?
+  [ "$held" -eq 1 ] && rmdir "$d" 2>/dev/null
+  return $rc
+}
+
+if [ "${RATHOLECTL_LIB_ONLY:-0}" != 1 ]; then rth_with_lock main "$@"; fi
