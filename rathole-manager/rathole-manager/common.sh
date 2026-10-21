@@ -375,8 +375,27 @@ HTML
 # service systemd fakeweb (web fik ba python3)
 fakeweb_service(){
   local svc="$1" port="${2:-8081}" action="${3:-start}"
-  command -v python3 >/dev/null 2>&1 || die "python3 nasb nist (apt install -y python3)."
   rth_write_fakeweb_html /var/www/rathole-fake
+  cat > /var/www/rathole-fake/server.py <<'PYEOF'
+import http.server, socketserver, sys, os
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+os.chdir('/var/www/rathole-fake')
+class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        f = self.translate_path(self.path)
+        if not os.path.exists(f) or os.path.isdir(f):
+            self.path = '/index.html'
+        return super().do_GET()
+    def do_HEAD(self):
+        f = self.translate_path(self.path)
+        if not os.path.exists(f) or os.path.isdir(f):
+            self.path = '/index.html'
+        return super().do_HEAD()
+    def log_message(self, format, *args):
+        pass
+with socketserver.TCPServer(('127.0.0.1', port), H) as httpd:
+    httpd.serve_forever()
+PYEOF
   case "$action" in
     start)
       cat > "/etc/systemd/system/${svc}.service" <<UNIT
@@ -384,7 +403,7 @@ fakeweb_service(){
 Description=rathole fake web ($svc)
 After=network.target
 [Service]
-ExecStart=/usr/bin/python3 -m http.server ${port} --bind 127.0.0.1 --directory /var/www/rathole-fake
+ExecStart=/usr/bin/python3 /var/www/rathole-fake/server.py ${port}
 Restart=always
 RestartSec=2
 [Install]

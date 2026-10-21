@@ -4,10 +4,13 @@
 #   sudo bash install-node.sh --server btli.ir:443 [--tls-hostname btli.ir] \
 #        [--tls-trusted-root /etc/rathole/ip-root-ca.crt] --name trk01 --token <T> --inbound-port 2087 \
 #        [--api-token <T> --api-inbound-port 62050]
+# nasb ba CLI (bedoon argument — tanzimat baad az nasb ba ratholenode):
+#   sudo bash install-node.sh
 # nasb az rooye backup:
 #   sudo bash install-node.sh --restore /root/rathole-node-backup-....tar.gz
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RATHOLE_VERSION="${RATHOLE_VERSION:-v0.5.0}"
 SERVER="" TLS_HOSTNAME="" TLS_TRUSTED_ROOT="" NAME="" TOKEN="" INBOUND="" API_TOKEN="" API_INBOUND="" RESTORE=""
 
@@ -33,15 +36,18 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "bayad ba root ejra shavad (sudo)."
-if [ -z "$RESTORE" ]; then
+
+CONFIG_NOW=0
+if [ -n "$RESTORE" ]; then
+  [ -f "$RESTORE" ] || die "file backup peyda nashod: $RESTORE"
+elif [ -n "$SERVER" ] || [ -n "$NAME" ] || [ -n "$TOKEN" ] || [ -n "$INBOUND" ]; then
   [ -n "$SERVER" ] && [ -n "$NAME" ] && [ -n "$TOKEN" ] && [ -n "$INBOUND" ] || \
     die "argumenthaye lazem: --server --name --token --inbound-port  (ya --restore <file>)"
   echo "$SERVER" | grep -qE '^[A-Za-z0-9_.-]+(:[0-9]{1,5})?$' || die "SERVER namotabar."
   [ -z "$TLS_HOSTNAME" ] || echo "$TLS_HOSTNAME" | grep -qE '^[A-Za-z0-9_.-]+$' || die "TLS hostname namotabar."
   [ -z "$TLS_TRUSTED_ROOT" ] || echo "$TLS_TRUSTED_ROOT" | grep -qE '^/[A-Za-z0-9_./-]{1,255}$' || die "TLS trusted root namotabar."
   [ -z "$TLS_TRUSTED_ROOT" ] || [ -n "$TLS_HOSTNAME" ] || die "--tls-trusted-root be --tls-hostname niaz darad."
-else
-  [ -f "$RESTORE" ] || die "file backup peyda nashod: $RESTORE"
+  CONFIG_NOW=1
 fi
 
 case "$(uname -m)" in
@@ -51,11 +57,11 @@ case "$(uname -m)" in
 esac
 
 # ---------- nasb rathole ----------
-if ! command -v rathole >/dev/null 2>&1; then
+install_rathole(){
   log "nasb pish-niazha va download rathole ${RATHOLE_VERSION}..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y && apt-get install -y curl unzip tar ca-certificates
-  tmp="$(mktemp -d)"
+  local tmp; tmp="$(mktemp -d)"
   local gh="rapiz1/rathole/releases/download/${RATHOLE_VERSION}/rathole-${RH_ARCH}.zip"
   local urls=(
     "https://github.com/${gh}"
@@ -74,23 +80,24 @@ if ! command -v rathole >/dev/null 2>&1; then
   unzip -o "$tmp/rathole.zip" -d "$tmp" >/dev/null
   install -m 755 "$tmp/rathole" /usr/local/bin/rathole
   rm -rf "$tmp"
+}
+
+if ! command -v rathole >/dev/null 2>&1; then
+  # agar core/SHA256SUMS vojood darad, az binary-e patched-e bundle estefade kon
+  if [ -f "$SCRIPT_DIR/core/SHA256SUMS" ] && [ -f "$SCRIPT_DIR/core-install.sh" ]; then
+    bash "$SCRIPT_DIR/core-install.sh" 2>/dev/null || install_rathole
+  else
+    install_rathole
+  fi
 fi
 
-# agar core/SHA256SUMS vojood darad, az binary-e patched-e bundle estefade kon
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/core/SHA256SUMS" ] && [ -f "$SCRIPT_DIR/core-install.sh" ]; then
-  bash "$SCRIPT_DIR/core-install.sh" 2>/dev/null || command -v rathole > /dev/null || die "nasb binary shekast khord."
-fi
-
-mkdir -p /etc/rathole
+mkdir -p /etc/rathole /usr/local/share/rathole
 
 # ---------- nasb ratholenode ----------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/ratholenode" ] && { install -m 755 "$SCRIPT_DIR/ratholenode" /usr/local/bin/ratholenode; log "ratholenode nasb shod."; } || warn "ratholenode knar askript nist."
-[ -f "$SCRIPT_DIR/common.sh" ] && { mkdir -p /usr/local/share/rathole; install -m 644 "$SCRIPT_DIR/common.sh" /usr/local/share/rathole/common.sh; rm -f /usr/local/bin/common.sh; log "common.sh nasb shod."; }
-# core-e backhaul-e patch-shode (uTLS) — bebin tozih dar install-panel.sh
+[ -f "$SCRIPT_DIR/common.sh" ] && { install -m 644 "$SCRIPT_DIR/common.sh" /usr/local/share/rathole/common.sh; rm -f /usr/local/bin/common.sh; log "common.sh nasb shod."; }
+# core-e backhaul-e patch-shode (uTLS)
 if [ -f "$SCRIPT_DIR/core-backhaul/SHA256SUMS" ]; then
-  mkdir -p /usr/local/share/rathole
   cp -rf "$SCRIPT_DIR/core-backhaul" /usr/local/share/rathole/
   chmod +x /usr/local/share/rathole/core-backhaul/*/backhaul 2>/dev/null || true
   log "core-e backhaul (uTLS) nasb shod."
@@ -116,6 +123,11 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 
+# faalsazi khodkar-e sait-e fik rooye node (baraye fallback-e 3x-ui / Xray dar service game)
+if [ ! -f /etc/systemd/system/rathole-fakeweb.service ]; then
+  /usr/local/bin/ratholenode fakeweb start 8081 >/dev/null 2>&1 || true
+fi
+
 # ---------- halat restore az backup ----------
 if [ -n "$RESTORE" ]; then
   log "restore node az backup: $RESTORE"
@@ -130,55 +142,61 @@ if [ -n "$RESTORE" ]; then
   exit 0
 fi
 
-# ---------- nasb tazh ----------
-log "neveshtan /etc/rathole/node.env va services.conf..."
-{
-  echo "SERVER=${SERVER}"
-  [ -n "$TLS_HOSTNAME" ] && echo "TLS_HOSTNAME=${TLS_HOSTNAME}"
-  [ -n "$TLS_TRUSTED_ROOT" ] && echo "TLS_TRUSTED_ROOT=${TLS_TRUSTED_ROOT}"
-  echo "RATHOLE_VERSION=${RATHOLE_VERSION}"
-} > /etc/rathole/node.env
-chmod 600 /etc/rathole/node.env
-{
-  echo "${NAME}|${TOKEN}|${INBOUND}"
-  [ -n "$API_TOKEN" ] && [ -n "$API_INBOUND" ] && echo "${NAME}_api|${API_TOKEN}|${API_INBOUND}"
-} > /etc/rathole/services.conf
-chmod 600 /etc/rathole/services.conf
-
-if command -v ratholenode >/dev/null 2>&1; then
-  ratholenode apply
-else
-  HOST="${TLS_HOSTNAME:-${SERVER%%:*}}"
-  [ -z "$TLS_TRUSTED_ROOT" ] || [ -f "$TLS_TRUSTED_ROOT" ] || die "TLS trusted root peyda nashod: $TLS_TRUSTED_ROOT"
+# ---------- nasb tazh ba argument ----------
+if [ "$CONFIG_NOW" -eq 1 ]; then
+  log "neveshtan /etc/rathole/node.env va services.conf..."
   {
-    echo "[client]"; echo "remote_addr = \"${SERVER}\""; echo "retry_interval = 1"; echo "heartbeat_timeout = 40"; echo
-    echo "[client.transport]"; echo "type = \"websocket\""; echo "[client.transport.websocket]"; echo "tls = true"
-    echo "[client.transport.tls]"; echo "hostname = \"${HOST}\""
-    [ -n "$TLS_TRUSTED_ROOT" ] && echo "trusted_root = \"${TLS_TRUSTED_ROOT}\""
-    echo
-    echo "[client.services.${NAME}]"; echo "token = \"${TOKEN}\""; echo "local_addr = \"127.0.0.1:${INBOUND}\""; echo "type = \"tcp\""
-    if [ -n "$API_TOKEN" ] && [ -n "$API_INBOUND" ]; then
-      echo; echo "[client.services.${NAME}_api]"; echo "token = \"${API_TOKEN}\""; echo "local_addr = \"127.0.0.1:${API_INBOUND}\""; echo "type = \"tcp\""
-    fi
-  } > /etc/rathole/client.toml
-  systemctl enable --now rathole-client
-fi
-sleep 1
-if systemctl is-active --quiet rathole-client; then
-  log "node '${NAME}' nasb va ba movafaghiat faal shod."
-else
-  warn "rathole-client start nashod ya dar halat-e khata ast. log-e service:"
-  journalctl -u rathole-client -n 15 --no-pager 2>&1 | sed 's/^/    /' >&2 || true
-fi
+    echo "SERVER=${SERVER}"
+    [ -n "$TLS_HOSTNAME" ] && echo "TLS_HOSTNAME=${TLS_HOSTNAME}"
+    [ -n "$TLS_TRUSTED_ROOT" ] && echo "TLS_TRUSTED_ROOT=${TLS_TRUSTED_ROOT}"
+    echo "RATHOLE_VERSION=${RATHOLE_VERSION}"
+  } > /etc/rathole/node.env
+  chmod 600 /etc/rathole/node.env
+  {
+    echo "${NAME}|${TOKEN}|${INBOUND}"
+    [ -n "$API_TOKEN" ] && [ -n "$API_INBOUND" ] && echo "${NAME}_api|${API_TOKEN}|${API_INBOUND}"
+  } > /etc/rathole/services.conf
+  chmod 600 /etc/rathole/services.conf
 
-# faalsazi khodkar-e sait-e fik rooye node (baraye fallback-e Xray dar service game)
-if [ ! -f /etc/systemd/system/rathole-fakeweb.service ]; then
-  /usr/local/bin/ratholenode fakeweb start 8081 >/dev/null 2>&1 || true
+  if command -v ratholenode >/dev/null 2>&1; then
+    ratholenode apply
+  else
+    HOST="${TLS_HOSTNAME:-${SERVER%%:*}}"
+    [ -z "$TLS_TRUSTED_ROOT" ] || [ -f "$TLS_TRUSTED_ROOT" ] || die "TLS trusted root peyda nashod: $TLS_TRUSTED_ROOT"
+    {
+      echo "[client]"; echo "remote_addr = \"${SERVER}\""; echo "retry_interval = 1"; echo "heartbeat_timeout = 40"; echo
+      echo "[client.transport]"; echo "type = \"websocket\""; echo "[client.transport.websocket]"; echo "tls = true"
+      echo "[client.transport.tls]"; echo "hostname = \"${HOST}\""
+      [ -n "$TLS_TRUSTED_ROOT" ] && echo "trusted_root = \"${TLS_TRUSTED_ROOT}\""
+      echo
+      echo "[client.services.${NAME}]"; echo "token = \"${TOKEN}\""; echo "local_addr = \"127.0.0.1:${INBOUND}\""; echo "type = \"tcp\""
+      if [ -n "$API_TOKEN" ] && [ -n "$API_INBOUND" ]; then
+        echo; echo "[client.services.${NAME}_api]"; echo "token = \"${API_TOKEN}\""; echo "local_addr = \"127.0.0.1:${API_INBOUND}\""; echo "type = \"tcp\""
+      fi
+    } > /etc/rathole/client.toml
+    systemctl enable --now rathole-client
+  fi
+  sleep 1
+  if systemctl is-active --quiet rathole-client; then
+    log "node '${NAME}' nasb va ba movafaghiat faal shod."
+  else
+    warn "rathole-client start nashod ya dar halat-e khata ast. log-e service:"
+    journalctl -u rathole-client -n 15 --no-pager 2>&1 | sed 's/^/    /' >&2 || true
+  fi
+else
+  # nasb-e sarih-e CLI bedoon argument
+  log "ratholenode ba movafaghiat nasb shod."
+  echo
+  echo "──────── marhale-ye baad rooye hamin server kharej ────────"
+  echo "۱. tanzim adres server Iran:"
+  echo "   sudo ratholenode set SERVER <domain_ya_ip_iran>:443"
+  echo
+  echo "۲. etesal service (inbound 3x-ui):"
+  echo "   sudo ratholenode add-svc <name> <token> <port_inbound_3xui>"
+  echo
+  echo "nemooneh:"
+  echo "   sudo ratholenode set SERVER iran.example.com:443"
+  echo "   sudo ratholenode add-svc node1 <TOKEN> 10001"
+  echo "   sudo ratholenode status"
+  echo "────────────────────────────────────────────────────────────"
 fi
-echo
-echo "gam baad rooye hamin node:"
-echo "  inbound Xray:  path=/${NAME} | listen=127.0.0.1 | port=${INBOUND} | TLS=off  (ya TLS/Reality baraye service game)"
-echo "afzoodan service/IP bishtar rooye hamin tunnel:  ratholenode add-svc <name> <token> <inbound>"
-echo "afzoodan server Iran dovom:  ratholenode upstream add <id> <server:443> ; ratholenode upstream add-svc <id> <name> <token> <inbound>"
-echo "backup node:  ratholenode backup"
-echo "barresi log:  journalctl -u rathole-client -f"

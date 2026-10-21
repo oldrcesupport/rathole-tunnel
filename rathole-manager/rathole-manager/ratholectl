@@ -560,8 +560,24 @@ gen_backhaul_server_toml(){
   rth_commit_config "$BH_TOML.tmp" "$BH_TOML"
 }
 
+# ---------- etminan az vojood map erteghaye websocket dar conf.d ----------
+ensure_upgrade_map(){
+  local f=/etc/nginx/conf.d/rathole-upgrade-map.conf
+  if [ ! -f "$f" ]; then
+    mkdir -p /etc/nginx/conf.d
+    cat > "$f" <<'MAP'
+# lazem baraye WebSocket/HTTPUpgrade
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+MAP
+  fi
+}
+
 # ---------- tvlid config nginx ----------
 gen_nginx_conf(){
+  ensure_upgrade_map
   local domain cert_fc cert_key ctrl fake sub sub_seg
   domain="$(s_get '.domain')";       cert_fc="$(s_get '.cert_fullchain')"
   cert_key="$(s_get '.cert_key')";   ctrl="$(s_get '.control_port')"
@@ -708,11 +724,11 @@ PXB
     echo
     echo "# tashkhis-e darkhast-e tunnel (WebSocket ya XHTTP stream)"
     echo "map \"\$http_upgrade:\$request_method:\$content_type\" \$is_tunnel_req {"
-    echo "    \"~*^websocket:\"         1;  # WebSocket"
-    echo "    \"~*:POST:\"              1;  # XHTTP (POST upload/stream)"
-    echo "    \"~*:.*octet-stream\"     1;  # XHTTP (binary stream)"
-    echo "    \"~*:.*xhttp\"            1;  # XHTTP"
-    echo "    default                  0;  # مرورگر یا اسکنر با متد GET معمولی"
+    echo "    \"~*^websocket:\"         1;"
+    echo "    \"~*:POST:\"              1;"
+    echo "    \"~*:.*octet-stream\"     1;"
+    echo "    \"~*:.*xhttp\"            1;"
+    echo "    default                  0;"
     echo "}"
     echo
     echo "map \"\$is_tunnel_req:\$is_sub_req\" \$backend_port {"
@@ -824,7 +840,7 @@ ${proxy_block}
         tcp_nodelay on;
         proxy_connect_timeout 3s;
         proxy_intercept_errors on;
-        error_page 502 503 504 =200 /;
+        error_page 404 502 503 504 =200 /;
         proxy_next_upstream error timeout http_502 http_503;
         proxy_next_upstream_tries 2;
         proxy_socket_keepalive on;
@@ -897,7 +913,7 @@ ${proxy_block}
         tcp_nodelay on;
         proxy_connect_timeout 3s;
         proxy_intercept_errors on;
-        error_page 502 503 504 =200 /;
+        error_page 404 502 503 504 =200 /;
         proxy_next_upstream error timeout http_502 http_503;
         proxy_next_upstream_tries 2;
         proxy_socket_keepalive on;
@@ -1058,7 +1074,7 @@ ${proxy_block}
         tcp_nodelay on;
         proxy_connect_timeout 3s;
         proxy_intercept_errors on;
-        error_page 502 503 504 =200 /;
+        error_page 404 502 503 504 =200 /;
         proxy_next_upstream error timeout http_502 http_503;
         proxy_next_upstream_tries 2;
         proxy_socket_keepalive on;

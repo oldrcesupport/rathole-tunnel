@@ -121,8 +121,8 @@ log "nasb pish-niazha (nginx, jq, curl, unzip, openssl, certbot, sshpass)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 # sshpass baraye provision-e khodkar-e node-ha az panel/hub (nasb-e kelid ba ramz) lazem ast.
-apt-get install -y nginx jq curl unzip openssl ca-certificates certbot python3-certbot-nginx sshpass libnginx-mod-stream 2>/dev/null || \
-apt-get install -y nginx jq curl unzip openssl ca-certificates certbot python3-certbot-nginx sshpass
+apt-get install -y nginx jq curl unzip openssl ca-certificates python3 certbot python3-certbot-nginx sshpass libnginx-mod-stream 2>/dev/null || \
+apt-get install -y nginx jq curl unzip openssl ca-certificates python3 certbot python3-certbot-nginx sshpass
 
 # ---------- nasb rathole ----------
 # esteratezhi (moshkel-e asli-ye Iran: GitHub filtr ast):
