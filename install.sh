@@ -2,12 +2,12 @@
 # install.sh — nasb-e tak-command az GitHub (curl | sudo bash)
 #
 # in file baraye ejra be sooratِ pipe tarahi shode:
-#   curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --panel \
+#   curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel \
 #        --domain panel.example.ir --fullchain /root/cert/.../fullchain.pem --key /root/cert/.../privkey.pem
-#   curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --node -- \
+#   curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
 #        --server panel.example.ir:443 --name trk01 --token <T> --inbound-port 2087
-#   curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --update
-#   curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --rollback
+#   curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --update
+#   curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --rollback
 #
 # nasb-e YEK NOSKHE-YE KHAS (release pinning) — ba flag، na motghayer-e mohiti:
 #   curl -fsSL .../install.sh | sudo bash -s -- --release v1.8.0 --panel --domain ...
@@ -19,12 +19,12 @@
 #   - agar nasb-e mojood (panel/node/hub) tashkhis dade shavad → pishfarz UPDATE ast
 #   - vagarna menu-ye taamoli az /dev/tty porside mishavad (nasb-e jadid)
 #
-# repo slug pishfarz loopy-iri/RatholeEngine ast؛ baraye estefade az fork-e khodet ba mtghir-e mohiti
+# repo slug pishfarz oldrcesupport/rathole-tunnel ast؛ baraye estefade az fork-e khodet ba mtghir-e mohiti
 # override kon:   RATHOLE_GH="youruser/yourrepo" curl -fsSL .../install.sh | sudo bash -s -- ...
 set -euo pipefail
 
 # ---------- tanzimat ----------
-GH="${RATHOLE_GH:-loopy-iri/RatholeEngine}"    # owner/repo — pishfarz، ba RATHOLE_GH override kon
+GH="${RATHOLE_GH:-oldrcesupport/rathole-tunnel}"    # owner/repo — pishfarz، ba RATHOLE_GH override kon
 REL="${RATHOLE_RELEASE:-latest}"               # latest | beta | yek tag mesl v1.0.0
 BASE="https://github.com/${GH}/releases"
 

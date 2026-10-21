@@ -1197,7 +1197,7 @@ regenerate(){
 print_node_install(){
   need_bin jq; ensure_state
   local name="$1" domain ctrl node token inbound aib at
-  local gh="${RATHOLE_GH:-loopy-iri/RatholeEngine}" ref="${RATHOLE_REF:-main}"
+  local gh="${RATHOLE_GH:-oldrcesupport/rathole-tunnel}" ref="${RATHOLE_REF:-main}"
   domain="$(s_get '.domain')"
   node="$(jq -c --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE")"
   [ -n "$node" ] || die "node '$name' peyda nashod."
@@ -2995,7 +2995,7 @@ menu(){
 cmd_update(){
   need_root
   command -v curl >/dev/null 2>&1 || die "curl lazem ast (apt install -y curl)."
-  local gh="${RATHOLE_GH:-loopy-iri/RatholeEngine}" rel="${RATHOLE_RELEASE:-latest}"
+  local gh="${RATHOLE_GH:-oldrcesupport/rathole-tunnel}" rel="${RATHOLE_RELEASE:-latest}"
   # 'ratholectl update beta' → kanal-e pre-release. chon releases/latest/download pre-release ha
   # ra nadide migirad, aval bayad tag-e daghigh ra az atom peyda konim.
   case "${1:-}" in

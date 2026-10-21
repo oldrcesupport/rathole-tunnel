@@ -1348,7 +1348,7 @@ cmd_migrate(){
 cmd_update(){
   need_root
   command -v curl >/dev/null 2>&1 || die "curl lazem ast (apt install -y curl)."
-  local gh="${RATHOLE_GH:-loopy-iri/RatholeEngine}" rel="${RATHOLE_RELEASE:-latest}"
+  local gh="${RATHOLE_GH:-oldrcesupport/rathole-tunnel}" rel="${RATHOLE_RELEASE:-latest}"
   # 'ratholenode update beta' → kanal-e pre-release (releases/latest/download an ra nadide migirad).
   case "${1:-}" in
     beta)

@@ -284,7 +284,7 @@ def deploy_to_server(server):
         return {"rc": 0, "out": "[mock deploy→%s] github install.sh --update (kanal=%s)" % (server.get("name"), _chan), "err": ""}
     cfg = get_config()
     # slug az config (sabet، na vorodi-ye karbar) va ba regex etebarsanji mishavad.
-    gh = str(cfg.get("gh_repo", "loopy-iri/RatholeEngine"))
+    gh = str(cfg.get("gh_repo", "oldrcesupport/rathole-tunnel"))
     if not RE_SLUG.match(gh):
         return {"rc": 1, "out": "", "err": "gh_repo namotabar dar config: %r" % gh}
     # kanal-e apdit az config (default stable). faghat stable/beta mojaz ast (RE_CHAN).
@@ -463,7 +463,7 @@ def mock_run(server, cmd_args):
         nm = cmd_args[2]
         return {"rc": 0, "out":
             "──────── dstvr nasb rooye node kharej (curl yek-khatti) ────────\n"
-            "curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --node -- \\\n"
+            "curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \\\n"
             "  --server rp01.l1t.ir:443 --name %s --token a0370655deadbeefcafe1234 --inbound-port 8444\n"
             "────────────────────────────────────────" % nm, "err": ""}
     if j == "ratholectl version":

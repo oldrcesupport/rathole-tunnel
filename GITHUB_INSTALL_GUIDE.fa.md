@@ -41,14 +41,9 @@
 ### ب) ارسال فایل‌ها از سیستم لوکال خود به مخزن:
 داخل پوشه پروژه روی سیستم خود ترمینال را باز کنید:
 ```bash
-git init
-git add .
-git commit -m "initial commit: rathole manager complete"
-git branch -M main
-git remote add origin https://github.com/<YOUR_USERNAME>/<REPO_NAME>.git
+git remote add origin https://github.com/oldrcesupport/rathole-tunnel.git
 git push -u origin main
 ```
-*(اگر از مخزن Private استفاده می‌کنید، یک Personal Access Token بسازید یا از مخزن Public استفاده کنید تا کلون روی سرورها بدون نیاز به پسورد باشد).*
 
 ---
 
@@ -61,16 +56,12 @@ git push -u origin main
 apt-get update -y && apt-get install -y git curl
 
 # کلون مخزن (در صورت مسدود بودن گیت‌هاب در ایران، از میرور زیر استفاده کنید):
-git clone https://github.com/<YOUR_USERNAME>/<REPO_NAME>.git /root/rathole-manager
+git clone https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
 # یا با میرور ضدتحریم:
-# git clone https://ghproxy.net/https://github.com/<YOUR_USERNAME>/<REPO_NAME>.git /root/rathole-manager
+# git clone https://ghproxy.net/https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
 
-# ورود به پوشه و اجرای بوت‌استرپ
-cd /root/rathole-manager/rathole-manager/rathole-manager
-chmod +x bootstrap.sh
-sudo bash bootstrap.sh
-
-# اجرای نصاب پنل سرور ایران
+# ورود به پوشه و اجرای نصاب پنل
+cd /root/rathole-manager
 sudo bash install-panel.sh
 ```
 
@@ -105,12 +96,8 @@ sudo ratholectl token node1
 وارد SSH سرور خارج شوید و دستورات زیر را وارد کنید:
 ```bash
 apt-get update -y && apt-get install -y git curl
-git clone https://github.com/<YOUR_USERNAME>/<REPO_NAME>.git /root/rathole-manager
-cd /root/rathole-manager/rathole-manager/rathole-manager
-chmod +x bootstrap.sh
-sudo bash bootstrap.sh
-
-# اجرای نصاب نود
+git clone https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
+cd /root/rathole-manager
 sudo bash install-node.sh
 ```
 
@@ -316,7 +303,6 @@ vless://e8a93cb4-56c2-48df-b118-86d1d4cb8040@iran.example.com:443?security=tls&e
 ```bash
 cd /root/rathole-manager
 git pull
-cd rathole-manager/rathole-manager
 sudo ratholectl regen
 ```
 کلیه سرویس‌ها بدون حتی یک ثانیه قطعی برای کاربران آنلاین (Zero-Downtime Reload) بروزرسانی می‌شوند.
