@@ -10,9 +10,9 @@
 
 | راهنما | فایل / مسیر | محتوا و کاربرد |
 | :--- | :--- | :--- |
-| ⚡ **[راهنمای نصب سریع با گیت‌هاب](GITHUB_INSTALL_GUIDE.fa.md)** | `GITHUB_INSTALL_GUIDE.fa.md` | نصب تک‌خطی از گیت‌هاب، پیکربندی اینباندهای 3x-ui، آپدیت آنی |
-| 📦 **[راهنمای نصب دستی و آفلاین](MANUAL_INSTALL_GUIDE.fa.md)** | `MANUAL_INSTALL_GUIDE.fa.md` | نصب با فایل زیپ/آفلاین بدون وابستگی به اینترنت، مدیریت با اسکریپت |
-| 🧠 **[مرجع جامع فنی و معماری](SETUP_AND_GAMING_GUIDE.fa.md)** | `SETUP_AND_GAMING_GUIDE.fa.md` | معماری عمیق، ضدپروب Nginx، کانفیگ‌های پیشرفته Xray و تیونینگ سیستم |
+| ⚡ **[راهنمای نصب سریع با گیت‌هاب](rathole-manager/docs/GITHUB_INSTALL_GUIDE.fa.md)** | `rathole-manager/docs/GITHUB_INSTALL_GUIDE.fa.md` | نصب تک‌خطی از گیت‌هاب، پیکربندی اینباندهای 3x-ui، آپدیت آنی |
+| 📦 **[راهنمای نصب دستی و آفلاین](rathole-manager/docs/MANUAL_INSTALL_GUIDE.fa.md)** | `rathole-manager/docs/MANUAL_INSTALL_GUIDE.fa.md` | نصب با فایل زیپ/آفلاین بدون وابستگی به اینترنت، مدیریت با اسکریپت |
+| 🧠 **[مرجع جامع فنی و معماری](rathole-manager/docs/SETUP_AND_GAMING_GUIDE.fa.md)** | `rathole-manager/docs/SETUP_AND_GAMING_GUIDE.fa.md` | معماری عمیق، ضدپروب Nginx، کانفیگ‌های پیشرفته Xray و تیونینگ سیستم |
 | 🏗️ **[مستندات معماری و ترانزیت](rathole-manager/docs/)** | `rathole-manager/docs/` | دیاگرام‌های تفصیلی، مشخصات پروتکل‌های ترانزیت، هاب و ویکی کامل |
 
 ---
