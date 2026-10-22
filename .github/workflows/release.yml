@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to release (e.g. v1.8.4)'
+        required: true
+        default: 'v1.8.4'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build rathole-manager.zip bundle
+        run: |
+          python scripts/package.py
+
+      - name: Generate SHA256SUMS
+        run: |
+          sha256sum bootstrap.sh rathole-manager.zip install.sh > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag_name }}
+          name: ${{ github.ref_name || inputs.tag_name }} — Stable Production Release
+          body: |
+            ## 🚀 Rathole Tunnel Manager Production Release
+            
+            نسخه پایدار و نهایی سیستم جامع تانل معکوس ضدتحریم و گیمینگ Rathole Manager همراه با رفع کامل ممیزی‌های امنیتی.
+
+            ### 📦 نحوه نصب سریع تک‌خطی (Quick Install):
+            
+            **سرور ایران (Panel / Hub):**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel
+            ```
+
+            **سرور خارج (Node):**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
+              --server YOUR_DOMAIN:443 --name node1 --token YOUR_TOKEN --inbound-port 10001
+            ```
+
+            ### 🛡️ مهم‌ترین قابلیت‌ها:
+            - پشتیبانی از پروتکل‌های وب‌گردی **WebSocket (WS)** و نسل نوین **XHTTP (SplitHTTP)**
+            - حالت گیمینگ فوق‌سریع لایه ۴ با تاخیر صفر (**0-RTT Vision + UDP FullCone**)
+            - ترانزیت ضد پکت‌لاس **KCP (UDP+FEC)** روی پورت ۴۴۳
+            - دفاع فعال در برابر فیلترینگ و اسکنرهای هوشمند با پاسخ شبیه‌سازی وب‌سرور واقعی (Anti-Probe 200 OK)
+            - اعمال کامل اصلاحات امنیتی (Fail-closed locking, umask 077, PBKDF2 hashing, secret redaction, SSH allowlist)
+            - سازگاری ۱۰۰٪ با پنل محبوب **3x-ui** سنایی
+          files: |
+            bootstrap.sh
+            rathole-manager.zip
+            install.sh
+            SHA256SUMS
+          draft: false
+          prerelease: false

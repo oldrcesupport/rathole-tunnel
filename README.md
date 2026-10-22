@@ -1,107 +1,114 @@
-# 🚀 Rathole Tunnel Manager (پروژه تانل معکوس ضدتحریم و گیمینگ)
+# 🚀 Rathole Tunnel Manager (سامانه تانل معکوس ضدتحریم و گیمینگ)
 
-سیستم جامع مدیریت تانل معکوس پرسرعت و پایدار بین سرور ایران و سرور خارج، مجهز به دفاع فعال در برابر فیلترینگ هوشمند، پشتیبانی از پروتکل‌های وب‌گردی **WebSocket (WS)** و نسل نوین **XHTTP (SplitHTTP)**، حالت **گیمینگ فوق‌سریع لایه ۴ (0-RTT Vision + UDP FullCone)** و مهارکننده پکت‌لاس **KCP (UDP+FEC)** روی پورت ۴۴۳.
+سیستم جامع و ماژولار مدیریت تانل معکوس پایدار و پرسرعت بین سرور ایران و سرور خارج، مجهز به دفاع فعال در برابر فیلترینگ و اسکنرهای هوشمند، پشتیبانی از پروتکل‌های وب‌گردی **WebSocket (WS)** و نسل نوین **XHTTP (SplitHTTP)**، حالت **گیمینگ فوق‌سریع لایه ۴ (0-RTT Vision + UDP FullCone)** و مهارکننده پکت‌لاس **KCP (UDP+FEC)** روی پورت ۴۴۳.
+
+کاملاً بهینه‌سازی شده برای استقرار آسان در کنار پنل محبوب گرافیکی **سنایی ([3x-ui](https://github.com/MHSanaei/3x-ui))** و مدیریت متمرکز کاربران بدون نیاز به تغییر مستقیم هسته Xray.
 
 ---
 
 ## 📚 فهرست راهنماهای اختصاصی (Documentation)
 
-| راهنما | فرمت / موضوع | کاربرد |
+| راهنما | فایل | محتوا و کاربرد |
 | :--- | :--- | :--- |
-| 📖 **[راهنمای نصب با گیت‌هاب](GITHUB_INSTALL_GUIDE.fa.md)** | `GITHUB_INSTALL_GUIDE.fa.md` | نصب سریع تک‌خطی از طریق مخزن، آپدیت آنی سرورها با `git pull` |
-| 📦 **[راهنمای نصب دستی و آفلاین](MANUAL_INSTALL_GUIDE.fa.md)** | `MANUAL_INSTALL_GUIDE.fa.md` | نصب با فایل زیپ و دستور `scp`، بدون وابستگی به گیت‌هاب |
-| 🧠 **[مرجع جامع فنی و معماری](SETUP_AND_GAMING_GUIDE.fa.md)** | `SETUP_AND_GAMING_GUIDE.fa.md` | معماری عمیق، ضد پروب Nginx، کانفیگ‌های کامل Xray و تیونینگ سیستم |
+| ⚡ **[راهنمای نصب سریع با گیت‌هاب](GITHUB_INSTALL_GUIDE.fa.md)** | `GITHUB_INSTALL_GUIDE.fa.md` | نصب تک‌خطی از گیت‌هاب، پیکربندی اینباندهای 3x-ui، آپدیت آنی |
+| 📦 **[راهنمای نصب دستی و آفلاین](MANUAL_INSTALL_GUIDE.fa.md)** | `MANUAL_INSTALL_GUIDE.fa.md` | نصب با فایل زیپ/آفلاین بدون وابستگی به اینترنت، مدیریت با اسکریپت |
+| 🧠 **[مرجع جامع فنی و معماری](SETUP_AND_GAMING_GUIDE.fa.md)** | `SETUP_AND_GAMING_GUIDE.fa.md` | معماری عمیق، ضدپروب Nginx، کانفیگ‌های پیشرفته Xray و تیونینگ سیستم |
 
 ---
 
-## ⚡ نصب سریع از طریق گیت‌هاب (Quick Start)
+## ⚡ روش‌های نصب و راه‌اندازی (Installation)
 
-### ۱. راه‌اندازی سرور ایران (Panel / Hub):
+### روش ۱: نصب تک‌خطی فوق‌سریع از گیت‌هاب (پیشنهادی)
+
+#### ۱. سرور ایران (Panel / Hub):
 ```bash
-# نصب پیش‌نیازها
-apt-get update -y && apt-get install -y git curl
-
-# دریافت پروژه
-git clone https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
-
-# ورود به پوشه و اجرای نصاب پنل
-cd /root/rathole-manager
-sudo bash install-panel.sh
-
-# ثبت دامنه و دریافت SSL رایگان:
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel
+```
+پس از نصب، گواهی SSL و پنل وب را فعال کنید:
+```bash
+# دریافت SSL رایگان Let's Encrypt:
 sudo ratholectl cert iran.example.com admin@example.com
 
-# بهینه‌سازی سرعت هسته سرور (BBR):
+# بهینه‌سازی سرعت هسته لینوکس (BBR):
 sudo ratholectl tune
 
-# فعال‌سازی پنل مدیریت تحت وب:
+# فعال‌سازی پنل مدیریت وب RatholeHub:
 sudo ratholectl hub on 2087
 ```
-🌐 پنل تحت وب: `https://iran.example.com/hub/`
+🌐 پنل تحت وب ایران: `https://iran.example.com/hub/`
+
+#### ۲. سرور خارج (Node) در کنار پنل ۳x-ui سنایی:
+روی سرور خارج:
+```bash
+# ۱. نصب پنل سنایی (3x-ui)
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+
+# ۲. اتصال نود تانل معکوس به سرور ایران
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
+  --server iran.example.com:443 --name node1 --token YOUR_NODE_TOKEN --inbound-port 10001
+```
 
 ---
 
-### ۲. راه‌اندازی سرور خارج و ادغام با پنل سنایی ([3x-ui](https://github.com/MHSanaei/3x-ui)):
-ابتدا روی سرور خارج، پنل سنایی و نود تانل را نصب کنید:
+### روش ۲: نصب از طریق کلون گیت‌هاب (برای توسعه‌دهندگان)
 
 ```bash
-# ۱. نصب پنل محبوب سنایی (3x-ui) روی سرور خارج
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
-
-# ۲. دریافت و نصب نود تانل معکوس
-apt-get update -y && apt-get install -y git curl
+# کلون ریپازیتوری
 git clone https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
 cd /root/rathole-manager
+
+# سرور ایران:
+sudo bash install-panel.sh
+
+# سرور خارج:
 sudo bash install-node.sh
 ```
-
-سپس نودها را در سرور ایران ساخته و به خارج وصل کنید:
-```bash
-# روی سرور ایران:
-sudo ratholectl add node1 10001
-sudo ratholectl token node1
-
-# روی سرور خارج:
-sudo ratholenode set SERVER iran.example.com:443
-sudo ratholenode add-svc node1 <YOUR_TOKEN> 10001
-sudo ratholenode status
-```
-اکنون وارد پنل ۳x-ui شوید (`http://<IP_KHAREJ>:2053`) و یک اینباند با Listening IP برابر با `127.0.0.1` و پورت `10001` بسازید! تمام کاربران و حجم‌ها را در ۳x-ui مدیریت کنید.
 
 ---
 
 ## 🛡️ ویژگی‌های برجسته امنیتی و فنی
 
 1. **دفاع فعال در برابر پروب و فیلترینگ (Active Probe Defense)**:
-   - درخواست‌های کاوشگر فیلترچی (Active Scanners) به جای خطای ۵۰۲/۵۰۳ یا صفحات مشکوک، یک پورتال شرکتی معتبر فناوری با کد وضعیت `200 OK` دریافت می‌کنند.
-   - تفکیک خودکار بسته‌های WebSocket و XHTTP از ربات‌های کاوشگر.
+   - درخواست‌های کاوشگر فیلترچی و ربات‌های اسکنر پورت به جای ارورهای مشکوک ۵۰۲ یا بسته بودن پورت، وب‌سایت شرکتی مدرن فارسی با کد وضعیت `200 OK` دریافت می‌کنند.
+   - جداسازی کامل و بدون بافر ترافیک واقعی WebSocket و XHTTP از ترافیک‌های کاوشگر.
 2. **پشتیبانی کامل از XHTTP (SplitHTTP)**:
    - عبور استریم پیوسته با `chunked_transfer_encoding on` و حذف کامل بافرینگ برای عدم شناسایی توسط فایروال هوش مصنوعی.
 3. **حالت گیمینگ بدون تاخیر (L4 SNI Passthrough 0-RTT)**:
    - عبور ترافیک مستقیم TCP/UDP بدون دخالت Nginx لایه ۷ با پروتکل `VLESS-Vision` و هندشیک رمزنگاری در سرور مقصد خارج.
 4. **مهار پکت‌لاس با KCP / UDP+FEC روی پورت 443**:
    - شبیه‌سازی الگوی QUIC گوگل و ترمیم بسته‌های از دست رفته اینترنت بین‌الملل با الگوریتم Reed-Solomon.
-5. **بروزرسانی بدون قطعی (Zero-Downtime Reload)**:
-   - بروزرسانی سریع تنظیمات و هسته‌ها با `git pull` بدون قطع شدن کانکشن کاربران آنلاین.
+5. **معماری فوق امنیتی (Fail-Closed & Hardened)**:
+   - مجوزهای محدود `umask 077`، `0600` برای فایل‌ها و `0700` برای دایرکتوری‌ها.
+   - قفل‌های تراکنشی اتمیک در نوشتن کانفیگ‌ها و state.
+   - رمزنگاری پسورد پنل با الگوریتم امن **PBKDF2-HMAC-SHA256**.
+   - حذف کامل و اتوماتیک اطلاعات حساس (توکن‌ها، پسوردها و کلیدها) از لاگ‌های ممیزی و خروجی‌های سیستم.
+6. **بروزرسانی بدون قطعی (Zero-Downtime Reload)**:
+   - بروزرسانی سریع تنظیمات با `git pull` بدون قطع شدن کانکشن کاربران آنلاین.
 
 ---
 
 ## 🛠️ دستورات پرکاربرد مدیریت سیستم (CLI)
 
 ```bash
-# بررسی سلامت کل سیستم و اجزا
+# بررسی سلامت کامل سیستم و ارتباطات
 sudo ratholectl doctor
 
 # مشاهده وضعیت نودها و پورت‌های تانل
 sudo ratholectl status
 
-# راه‌اندازی سرویس گیمینگ اختصاصی
-sudo ratholectl game add game1 10002 game.example.com
+# افزودن یک نود جدید
+sudo ratholectl add node2 10002
 
-# روشن کردن حالت ضد پکت‌لاس KCP
+# دریافت توکن یک نود
+sudo ratholectl token node2
+
+# راه‌اندازی سرویس گیمینگ اختصاصی (لایه ۴)
+sudo ratholectl game add game1 10003 game.example.com
+
+# روشن کردن حالت ضد پکت‌لاس KCP روی پورت ۴۴۳
 sudo ratholectl kcp on 443 balanced
 
-# تولید مجدد و ریلود بدون قطعی
+# تولید مجدد کانفیگ‌ها و ریلود بدون قطعی
 sudo ratholectl regen
 ```
 
