@@ -132,6 +132,14 @@ systemctl(){
       return 1
     fi
   fi
+  if [ "\${FAIL_SYSTEMCTL_RESTART_BUT_ACTIVE:-0}" = "1" ]; then
+    if [ "\${1:-}" = "restart" ] || [ "\${1:-}" = "reload" ] || [ "\${1:-}" = "start" ]; then
+      return 1
+    fi
+    if [ "\${1:-}" = "is-active" ]; then
+      return 0
+    fi
+  fi
   if [ "\${FAIL_SYSTEMCTL_IS_ACTIVE:-0}" = "1" ]; then
     if [ "\${1:-}" = "is-active" ]; then
       return 1
@@ -139,6 +147,18 @@ systemctl(){
   fi
   return 0
 }
+if [ "\${FAIL_SNAPSHOT_MKTEMP:-0}" = "1" ]; then
+  rth_mktemp(){ return 1; }
+fi
+if [ "\${FAIL_RESTORE_CP:-0}" = "1" ]; then
+  _real_cp="\$(which cp 2>/dev/null || echo cp)"
+  cp(){
+    if [ "\${RTH_IN_ROLLBACK:-0}" = "1" ]; then
+      return 1
+    fi
+    "\$_real_cp" "\$@"
+  }
+fi
 dpkg(){ return 0; }
 apt-get(){ return 0; }
 certbot(){ return 0; }
@@ -177,6 +197,14 @@ systemctl(){
   if [ "\${FAIL_SYSTEMCTL_START:-0}" = "1" ]; then
     if [ "\${1:-}" = "start" ]; then
       return 1
+    fi
+  fi
+  if [ "\${FAIL_SYSTEMCTL_RESTART_BUT_ACTIVE:-0}" = "1" ]; then
+    if [ "\${1:-}" = "restart" ] || [ "\${1:-}" = "reload" ] || [ "\${1:-}" = "start" ]; then
+      return 1
+    fi
+    if [ "\${1:-}" = "is-active" ]; then
+      return 0
     fi
   fi
   if [ "\${FAIL_SYSTEMCTL_IS_ACTIVE:-0}" = "1" ]; then
@@ -691,6 +719,134 @@ assert_eq "$rc" "1" "restart_svc vaghti restart shekast khord return 1 dad"
 )
 rc=$?
 assert_eq "$rc" "1" "reload_svc vaghti start/reload shekast khord return 1 dad"
+
+line "tst 33: Fault Injection: Snapshot failure halts before mutation and preserves previous state and files"
+STATE_FILE="$ROOT/etc/rathole-manager/state.json"
+CONF_FILE="$ROOT/etc/nginx/conf.d/rathole.conf"
+TOML_FILE="$ROOT/etc/rathole/server.toml"
+PRE_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+PRE_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+PRE_TOML_SHA="$(sha256sum "$TOML_FILE" | cut -d' ' -f1)"
+
+FAIL_SNAPSHOT_MKTEMP=1 bash "$RUN" cmd_add failnode01 2022 >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_add ba FAIL_SNAPSHOT_MKTEMP=1 bayad pish az taghir fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+POST_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+POST_TOML_SHA="$(sha256sum "$TOML_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json pas az shekast-e snapshot dast-nakhorde mand"
+assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf pas az shekast-e snapshot dast-nakhorde mand"
+assert_eq "$POST_TOML_SHA" "$PRE_TOML_SHA" "server.toml pas az shekast-e snapshot dast-nakhorde mand"
+
+line "tst 34: Fault Injection: Restart failure with lingering is-active process fails closed and rolls back"
+PRE_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+PRE_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+PRE_TOML_SHA="$(sha256sum "$TOML_FILE" | cut -d' ' -f1)"
+
+FAIL_SYSTEMCTL_RESTART_BUT_ACTIVE=1 bash "$RUN" cmd_set domain badlinger.ir >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_set ba restart failure va lingering is-active bayad fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+POST_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+POST_TOML_SHA="$(sha256sum "$TOML_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json be domain-e ghabli rollback shod"
+assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf be domain-e ghabli rollback shod"
+assert_eq "$POST_TOML_SHA" "$PRE_TOML_SHA" "server.toml be noskhe-ye ghabli rollback shod"
+
+(
+  export FAIL_SYSTEMCTL_RESTART_BUT_ACTIVE=1
+  bash "$RUN_NODE" restart_svc >/dev/null 2>&1
+)
+rc=$?
+assert_eq "$rc" "1" "ratholenode restart_svc ba lingering is-active fail-closed kard"
+
+line "tst 35: Fault Injection: Restore failure during rollback never deletes pre-existing files"
+[ -f "$CONF_FILE" ] && [ -f "$TOML_FILE" ]
+assert_ok $? "file-haye ghabli vojood darand"
+FAIL_NGINX_T_ONCE=1 FAIL_RESTORE_CP=1 bash "$RUN" regenerate >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "regenerate ba khata-ye nginx-t va restore failure khata dad"
+[ -f "$CONF_FILE" ]
+assert_ok $? "rathole.conf ba vojood-e restore failure hazf nashod"
+[ -f "$TOML_FILE" ]
+assert_ok $? "server.toml ba vojood-e restore failure hazf nashod"
+
+line "tst 36: State schema validation rejection in rth_state_tx"
+PRE_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+bash "$RUN" rth_state_tx '.nodes = "string-instead-of-array"' >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "rth_state_tx schema ba .nodes gheyre-array ra rad kard"
+bash "$RUN" rth_state_tx '.nodes = [{"name": "", "token": "abc"}]' >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "rth_state_tx schema ba name-e khali dar node ra rad kard"
+bash "$RUN" rth_state_tx '.domain = 12345' >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "rth_state_tx schema ba domain-e adadi ra rad kard"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json dar barabar-e schema namotabar dast-nakhorde mand"
+
+line "tst 37: Full transaction rollback on mutation failure (cmd_domain_add & cmd_add)"
+PRE_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+PRE_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+PRE_TOML_SHA="$(sha256sum "$TOML_FILE" | cut -d' ' -f1)"
+
+FAIL_NGINX_T_ONCE=1 bash "$RUN" cmd_domain_add fail-domain.com >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_domain_add ba khata-ye regenerate bayad fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+POST_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+POST_TOML_SHA="$(sha256sum "$TOML_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json pas az shekast-e domain_add rollback shod"
+assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf pas az shekast-e domain_add rollback shod"
+assert_eq "$POST_TOML_SHA" "$PRE_TOML_SHA" "server.toml pas az shekast-e domain_add rollback shod"
+
+FAIL_NGINX_T_ONCE=1 bash "$RUN" cmd_add failnode02 2099 >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_add ba khata-ye regenerate bayad fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "failnode02 dar state sabt nashod va rollback shod"
+
+line "tst 38: Tunnel switch fail-closed and verified rollback"
+PRE_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+FAIL_SYSTEMCTL_RESTART_BUT_ACTIVE=1 bash "$RUN" cmd_kcp_on 2025 >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_kcp_on ba restart failure bayad fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "kcp_port dar state sabt nashod va rollback shod"
+
+FAIL_SYSTEMCTL_RESTART_BUT_ACTIVE=1 bash "$RUN" cmd_noise on 2335 >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_noise on ba restart failure bayad fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "noise_port dar state sabt nashod va rollback shod"
+
+line "tst 39: Checksum verification failure in verify_sha256"
+CHECK_FILE="$ROOT/check_test.txt"
+echo "checksum payload" > "$CHECK_FILE"
+CORRECT_SHA="$(sha256sum "$CHECK_FILE" | awk '{print $1}')"
+BOOTSTRAP_SH="$BASE/../../bootstrap.sh"
+
+bash -c "BOOTSTRAP_LIB_ONLY=1 source '$BOOTSTRAP_SH' && verify_sha256 '$CHECK_FILE' '$CORRECT_SHA'" >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "0" "verify_sha256 ba hash-e dorost bayad movafagh shavad"
+
+bash -c "BOOTSTRAP_LIB_ONLY=1 source '$BOOTSTRAP_SH' && verify_sha256 '$CHECK_FILE' '0000000000000000000000000000000000000000000000000000000000000000'" >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "verify_sha256 ba hash-e eshtebah bayad fail shavad"
+
+bash -c "BOOTSTRAP_LIB_ONLY=1 source '$BOOTSTRAP_SH' && verify_sha256 '$ROOT/nonexistent.bin' '$CORRECT_SHA'" >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "verify_sha256 ba file-e gomshode bayad fail shavad"
+
+line "tst 40: Incomplete manifest check (SHA256SUMS missing required file)"
+TEST_SUMS="$ROOT/test_SHA256SUMS"
+cat > "$TEST_SUMS" <<'EOF'
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  rathole-manager.zip
+EOF
+# bootstrap.sh is missing from TEST_SUMS
+grep -qE "[[:space:]](\./)?bootstrap\.sh$" "$TEST_SUMS"
+rc=$?
+assert_eq "$rc" "1" "manifest-e naghes (bedoon bootstrap.sh) bayad rad shavad"
 
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"

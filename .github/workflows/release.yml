@@ -50,16 +50,38 @@ jobs:
             exit 1
           fi
 
-          # Fail closed if attempting to overwrite an already existing release
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "::error::Release $TAG already exists on GitHub! Releasing over existing tags is prohibited."
-              exit 1
-            fi
+          # Fail closed if attempting to overwrite an already existing release (for push, dispatch, and rerun)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists on GitHub! Releasing over existing tags or re-running a release on an existing release is strictly prohibited."
+            exit 1
           fi
 
-          TARGET_SHA="$(git rev-parse HEAD)"
-          echo "Resolved target commit SHA: $TARGET_SHA"
+          # Verify version matches MANAGER_VERSION
+          CLEAN_TAG="${TAG#v}"
+          source rathole-manager/rathole-manager/common.sh
+          echo "Comparing tag version '$CLEAN_TAG' with MANAGER_VERSION '$MANAGER_VERSION'"
+          if [ "$CLEAN_TAG" != "$MANAGER_VERSION" ]; then
+            echo "::error::Release tag version ($CLEAN_TAG) does not match MANAGER_VERSION ($MANAGER_VERSION)!"
+            exit 1
+          fi
+
+          # Fetch remote tags to check if git tag already exists
+          git fetch --tags origin || true
+
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
+            echo "Existing git tag $TAG points to commit: $TAG_SHA"
+            if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+              echo "::error::Tag $TAG points to commit $TAG_SHA, but checked out HEAD is $HEAD_SHA. Refusing to release artifacts built from a different HEAD to an existing tag!"
+              exit 1
+            fi
+            TARGET_SHA="$TAG_SHA"
+          else
+            TARGET_SHA="$HEAD_SHA"
+          fi
+
+          echo "Resolved validated target commit SHA: $TARGET_SHA"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
 
@@ -208,6 +230,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-tag.outputs.release_tag }}
+          target_commitish: ${{ needs.validate-tag.outputs.target_sha }}
           name: ${{ needs.validate-tag.outputs.release_tag }} — Hardened Release
           body: |
             ## 🚀 Rathole Tunnel Manager Release

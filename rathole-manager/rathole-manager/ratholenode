@@ -106,7 +106,7 @@ safe_kv_set(){
   local dir; dir="$(dirname "$file")"
   mkdir -p "$dir" 2>/dev/null || true
   local tmp
-  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null)" || return 1
   chmod 0600 "$tmp" 2>/dev/null || true
 
   if [ -f "$file" ]; then
@@ -162,7 +162,7 @@ safe_kv_del(){
   done
 
   local tmp
-  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null)" || return 1
   chmod 0600 "$tmp" 2>/dev/null || true
 
   local del_keys="$*"
@@ -200,7 +200,7 @@ safe_svc_del(){
   esac
 
   local tmp
-  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null)" || return 1
   chmod 0600 "$tmp" 2>/dev/null || true
 
   TARGET_NAME="$name" awk -F'|' '
@@ -675,7 +675,7 @@ gen_kcp_client_unit(){ # $1=remote $2=local $3=key $4=ds $5=ps $6=mode $7=sw $8=
   validate_kcp_key "$key" || die "kcp key namotabar"
   local udir; udir="$(dirname "$KCP_CLI_UNIT")"
   mkdir -p "$udir"
-  local tmp; tmp="$(mktemp "$udir/.kcp_unit.XXXXXX" 2>/dev/null || mktemp)"
+  local tmp; tmp="$(mktemp "$udir/.kcp_unit.XXXXXX" 2>/dev/null)" || { err "sakht-e file-e movaghat baraye unit shekast khord"; return 1; }
   chmod 644 "$tmp" 2>/dev/null || true
   cat > "$tmp" <<UNIT
 [Unit]
@@ -692,8 +692,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
-  mv -f "$tmp" "$KCP_CLI_UNIT" || { rm -f "$tmp"; die "jaye gozini-e unit shekast khord."; }
+  mv -f "$tmp" "$KCP_CLI_UNIT" || { rm -f "$tmp"; err "jaye gozini-e unit shekast khord."; return 1; }
   chmod 644 "$KCP_CLI_UNIT" 2>/dev/null || true
+  return 0
 }
 
 # profile FEC ("datashard parityshard mode sndwnd rcvwnd") dar common.sh:kcp_profile ast —
@@ -718,33 +719,100 @@ cmd_kcp_on(){
   params="$(kcp_profile "$profile")" || die "profile namotabar: $profile (balanced|lossy|aggressive)"
   read -r ds ps mode sw rw <<<"$params"
   install_kcptun_client
-  gen_kcp_client_unit "$remote" "$local_ep" "$key" "$ds" "$ps" "$mode" "$sw" "$rw"
-  systemctl daemon-reload || return 1
-  systemctl enable rathole-kcp-client >/dev/null 2>&1 || return 1
-  systemctl restart rathole-kcp-client 2>/dev/null
-  if systemctl is-active --quiet rathole-kcp-client; then
-    log "kcp-client faal shod: $local_ep → UDP $remote (profile: $profile)."
-  else
-    err "rathole-kcp-client bala niamd; log: journalctl -u rathole-kcp-client -n 30"
+
+  # Snapshot current state before mutations
+  local env_bak="" cli_bak="" unit_bak="" had_unit=0
+  if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+  if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+  if [ -f "$KCP_CLI_UNIT" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$KCP_CLI_UNIT" "$unit_bak" || return 1; had_unit=1; fi
+
+  _kcp_on_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+    [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$KCP_CLI_UNIT" 2>/dev/null || true
+    else
+      systemctl stop rathole-kcp-client 2>/dev/null || true
+      systemctl disable rathole-kcp-client 2>/dev/null || true
+      rm -f "$KCP_CLI_UNIT" 2>/dev/null || true
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "$env_bak" "$cli_bak" "$unit_bak" 2>/dev/null || true
+    restart_svc 2>/dev/null || true
+  }
+
+  if ! gen_kcp_client_unit "$remote" "$local_ep" "$key" "$ds" "$ps" "$mode" "$sw" "$rw"; then
+    _kcp_on_rollback
+    err "sakht-e unit-e kcp-client shekast khord"
     return 1
   fi
+  if ! systemctl daemon-reload; then
+    _kcp_on_rollback
+    err "daemon-reload shekast khord"
+    return 1
+  fi
+  if ! systemctl enable rathole-kcp-client >/dev/null 2>&1; then
+    _kcp_on_rollback
+    err "enable-e rathole-kcp-client shekast khord"
+    return 1
+  fi
+  if ! systemctl restart rathole-kcp-client 2>/dev/null || ! systemctl is-active --quiet rathole-kcp-client; then
+    _kcp_on_rollback
+    err "rathole-kcp-client bala niamd ya restart shekast khord; log: journalctl -u rathole-kcp-client -n 30"
+    return 1
+  fi
+  log "kcp-client faal shod: $local_ep → UDP $remote (profile: $profile)."
+
   # switch tunnel be kcp va baztolid client.toml
   env_set TUNNEL kcp
   env_set KCP_LOCAL "$local_ep"
   env_set KCP_REMOTE "$remote"
   env_set KCP_PROFILE "$profile"
-  gen_client
-  restart_svc || return 1
+  if ! gen_client || ! restart_svc; then
+    _kcp_on_rollback
+    err "baztolid-e client ya restart-e $SVC shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$cli_bak" "$unit_bak" 2>/dev/null || true
   log "tunnel be masir kcp/UDP+FEC switch shod. serviceha/tokenha/path karbaran taghir nakard."
   warn "agar serviceha vsl nshdnd, rooye Iran motmaen shv 'ratholectl kcp on' ba haman profile zade shode va UDP baz ast."
 }
 
 cmd_kcp_off(){
-  systemctl disable --now rathole-kcp-client 2>/dev/null || true
-  rm -f "$KCP_CLI_UNIT"; systemctl daemon-reload 2>/dev/null || true
+  # Snapshot current state before mutations
+  local env_bak="" cli_bak="" unit_bak="" had_unit=0
+  if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+  if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+  if [ -f "$KCP_CLI_UNIT" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$KCP_CLI_UNIT" "$unit_bak" || return 1; had_unit=1; fi
+
+  _kcp_off_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+    [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$KCP_CLI_UNIT" 2>/dev/null || true
+      systemctl daemon-reload 2>/dev/null || true
+      systemctl enable rathole-kcp-client 2>/dev/null || true
+      systemctl restart rathole-kcp-client 2>/dev/null || true
+    fi
+    rm -f "$env_bak" "$cli_bak" "$unit_bak" 2>/dev/null || true
+    restart_svc 2>/dev/null || true
+  }
+
+  systemctl stop rathole-kcp-client 2>/dev/null || true
+  systemctl disable rathole-kcp-client 2>/dev/null || true
+  rm -f "$KCP_CLI_UNIT"
+  if ! systemctl daemon-reload; then
+    _kcp_off_rollback
+    err "daemon-reload shekast khord"
+    return 1
+  fi
   env_set TUNNEL ws
-  gen_client
-  restart_svc || return 1
+  if ! gen_client || ! restart_svc; then
+    _kcp_off_rollback
+    err "bargasht be websocket shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$cli_bak" "$unit_bak" 2>/dev/null || true
   log "tunnel be halat websocket/443 bargasht."
 }
 
@@ -777,18 +845,49 @@ cmd_plain_on(){
   [ -n "$remote" ] || die "estefade: ratholenode plain on <iran_ip:port>  (port-e HTTP-e sade rooye Iran, masalan 8880)"
   echo "$remote" | grep -qE '^[^:]+:[0-9]+$' || die "adres bayad be shkl IP:PORT bashad (masalan 1.2.3.4:8880)."
   is_valid_port "${remote##*:}" || die "port-e remote namotabar (${remote##*:}). bayad adadi bein-e 1 ta 65535 bashad."
+
+  local env_bak="" cli_bak=""
+  if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+  if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+
+  _plain_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+    [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+    rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
+    restart_svc 2>/dev/null || true
+  }
+
   env_set TUNNEL plain
   env_set PLAIN_REMOTE "$remote"
-  gen_client
-  restart_svc || return 1
+  if ! gen_client || ! restart_svc; then
+    _plain_rollback
+    err "switch be halat plain shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
   log "tunnel be halat plain (bedoon TLS) switch shod → ws://$remote"
   warn "rooye server Iran motmaen shv 'ratholectl plain on [port]' zade shode va port TCP baz ast."
 }
 
 cmd_plain_off(){
+  local env_bak="" cli_bak=""
+  if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+  if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+
+  _plain_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+    [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+    rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
+    restart_svc 2>/dev/null || true
+  }
+
   env_set TUNNEL ws
-  gen_client
-  restart_svc || return 1
+  if ! gen_client || ! restart_svc; then
+    _plain_rollback
+    err "bargasht az halat plain shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
   log "tunnel be halat websocket/443 (ba TLS) bargasht."
 }
 
@@ -819,20 +918,51 @@ cmd_noise_on(){
   echo "$remote" | grep -qE '^[^:]+:[0-9]+$' || die "adres bayad be shkl IP:PORT bashad (masalan 1.2.3.4:2334)."
   is_valid_port "${remote##*:}" || die "port-e remote namotabar (${remote##*:}). bayad adadi bein-e 1 ta 65535 bashad."
   echo "$pubkey" | grep -qE '^[A-Za-z0-9+/]{40,64}={0,2}$' || die "pubkey bayad base64-e motabar bashad (az 'ratholectl noise show' rooye Iran)."
+
+  local env_bak="" cli_bak=""
+  if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+  if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+
+  _noise_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+    [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+    rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
+    restart_svc 2>/dev/null || true
+  }
+
   env_set TUNNEL noise
   env_set NOISE_REMOTE "$remote"
   env_set NOISE_PUBKEY "$pubkey"
   [ -n "$pattern" ] && env_set NOISE_PATTERN "$pattern" || env_set NOISE_PATTERN "Noise_NK_25519_ChaChaPoly_BLAKE2s"
-  gen_client
-  restart_svc || return 1
+  if ! gen_client || ! restart_svc; then
+    _noise_rollback
+    err "switch be halat noise shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
   log "tunnel be halat noise (ramznegari-shode) switch shod → noise://$remote"
   warn "rooye server Iran motmaen shv 'ratholectl noise on' zade shode va in node ba 'ratholectl noise node <name> on' faal shode va port TCP baz ast."
 }
 
 cmd_noise_off(){
+  local env_bak="" cli_bak=""
+  if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+  if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+
+  _noise_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+    [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+    rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
+    restart_svc 2>/dev/null || true
+  }
+
   env_set TUNNEL ws
-  gen_client
-  restart_svc || return 1
+  if ! gen_client || ! restart_svc; then
+    _noise_rollback
+    err "bargasht az halat noise shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$cli_bak" 2>/dev/null || true
   log "tunnel be halat websocket/443 (ba TLS) bargasht."
 }
 
@@ -880,7 +1010,11 @@ gen_backhaul_client_toml(){
 }
 
 gen_backhaul_client_unit(){
-  cat > "$BH_CLI_UNIT" <<UNIT
+  local udir; udir="$(dirname "$BH_CLI_UNIT")"
+  mkdir -p "$udir" 2>/dev/null || true
+  local tmp; tmp="$(mktemp "$udir/.bh_unit.XXXXXX" 2>/dev/null)" || { err "sakht-e temp file baraye backhaul client unit shekast khord"; return 1; }
+  chmod 644 "$tmp" 2>/dev/null || true
+  cat > "$tmp" <<UNIT
 [Unit]
 Description=backhaul client (SMUX core, foreign node)
 After=network.target
@@ -894,7 +1028,10 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 UNIT
+  mv -f "$tmp" "$BH_CLI_UNIT" || { rm -f "$tmp"; err "jaye gozini-e backhaul client unit shekast khord."; return 1; }
+  chmod 644 "$BH_CLI_UNIT" 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
+  return 0
 }
 
 cmd_backhaul(){
@@ -915,46 +1052,114 @@ cmd_backhaul(){
       # profile bayad ba samt-e Iran YEKSAN bashad vagarna parametrhaye SMUX nemikhanand.
       backhaul_mux_profile "$profile" >/dev/null || die "profile namotabar (balanced|lossy|aggressive)."
       install_backhaul client
+
+      local env_bak="" cli_bak="" bh_toml_bak="" bh_unit_bak="" had_bh_unit=0 had_bh_toml=0
+      if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+      if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+      if [ -f "$BH_TOML" ]; then bh_toml_bak="$(rth_mktemp)" || return 1; cp -a "$BH_TOML" "$bh_toml_bak" || return 1; had_bh_toml=1; fi
+      if [ -f "$BH_CLI_UNIT" ]; then bh_unit_bak="$(rth_mktemp)" || return 1; cp -a "$BH_CLI_UNIT" "$bh_unit_bak" || return 1; had_bh_unit=1; fi
+
+      _bh_on_rollback(){
+        [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+        [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+        if [ "$had_bh_toml" -eq 1 ] && [ -n "$bh_toml_bak" ] && [ -f "$bh_toml_bak" ]; then
+          cp -a "$bh_toml_bak" "$BH_TOML" 2>/dev/null || true
+        else
+          rm -f "$BH_TOML" 2>/dev/null || true
+        fi
+        if [ "$had_bh_unit" -eq 1 ] && [ -n "$bh_unit_bak" ] && [ -f "$bh_unit_bak" ]; then
+          cp -a "$bh_unit_bak" "$BH_CLI_UNIT" 2>/dev/null || true
+        else
+          systemctl stop "$BH_CLI_SVC" 2>/dev/null || true
+          systemctl disable "$BH_CLI_SVC" 2>/dev/null || true
+          rm -f "$BH_CLI_UNIT" 2>/dev/null || true
+        fi
+        systemctl daemon-reload 2>/dev/null || true
+        rm -f "$env_bak" "$cli_bak" "$bh_toml_bak" "$bh_unit_bak" 2>/dev/null || true
+        systemctl enable "$SVC" 2>/dev/null || true
+        restart_svc 2>/dev/null || true
+      }
+
       env_set BH_REMOTE_ADDR "$remote"
       safe_kv_del "$ENV_FILE" BH_REMOTE
       env_set BH_TOKEN "$token"
       env_set BH_TRANSPORT "$transport"
       env_set BH_PROFILE "$profile"
       env_set TUNNEL backhaul
-      gen_backhaul_client_toml
-      gen_backhaul_client_unit
-      systemctl enable "$BH_CLI_SVC" >/dev/null 2>&1 || true
-      if systemctl restart "$BH_CLI_SVC" 2>/dev/null && systemctl is-active --quiet "$BH_CLI_SVC"; then
-        log "$BH_CLI_SVC start shod (mux → ${remote}, transport=${transport}, profile=${profile})."
-      else
+      if ! gen_backhaul_client_toml || ! gen_backhaul_client_unit; then
+        _bh_on_rollback
+        err "sakht-e config ya unit-e backhaul shekast khord"
+        return 1
+      fi
+      if ! systemctl daemon-reload; then
+        _bh_on_rollback
+        err "daemon-reload shekast khord"
+        return 1
+      fi
+      if ! systemctl enable "$BH_CLI_SVC" >/dev/null 2>&1; then
+        _bh_on_rollback
+        err "enable-e $BH_CLI_SVC shekast khord"
+        return 1
+      fi
+      if ! systemctl restart "$BH_CLI_SVC" 2>/dev/null || ! systemctl is-active --quiet "$BH_CLI_SVC"; then
+        _bh_on_rollback
         err "start $BH_CLI_SVC shekast khord; log: journalctl -u $BH_CLI_SVC -n 30 --no-pager"
         return 1
       fi
+      log "$BH_CLI_SVC start shod (mux → ${remote}, transport=${transport}, profile=${profile})."
+
       case "$transport" in
         ws|wsmux) warn "in masir TLS nadarad؛ baraye ramznegari/camouflage az wss/wssmux ya Noise estefade kon." ;;
         wss|wssmux)
-          # be IP-e khali yaani gvahi-ye self-signed-e samt-e Iran. client-e backhaul gvahi ra
-          # verify NEMIKONAD (InsecureSkipVerify dar upstream) — in ra sarih begoo ta operator
-          # khial nakonad hefazat dar barabar-e MITM-e faal ham darad.
           echo "$remote" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}:' && \
             warn "TLS be IP-e khali: gvahi verify NEMISHAVAD — ramz dar barabar-e shenod-e ghayr-faal bargharar ast، vali MITM-e faal daf nemishavad." ;;
       esac
-      # backhaul JAYGOZIN-e kamel-e tunnel-e rathole baraye in node ast: samt-e Iran service az
-      # server.toml hazf shode, pas rathole-client be service-i vasl mishavad ke digar nist va
-      # crash-loop mikonad. khamoosh (va disable ta bad az reboot ham balaa nayayad).
+      # backhaul JAYGOZIN-e kamel-e tunnel-e rathole baraye in node ast:
       systemctl disable --now "$SVC" 2>/dev/null || true
       log "$SVC khamoosh shod (backhaul jaygozin-e tunnel shod)."
       warn "rooye Iran motmaen shv 'ratholectl backhaul on' zade shode va in node ba 'ratholectl backhaul node <name> on' faal ast."
+      rm -f "$env_bak" "$cli_bak" "$bh_toml_bak" "$bh_unit_bak" 2>/dev/null || true
       ;;
     off)
-      systemctl disable --now "$BH_CLI_SVC" 2>/dev/null || true
-      rm -f "$BH_CLI_UNIT" "$BH_TOML"; systemctl daemon-reload 2>/dev/null || true
+      local env_bak="" cli_bak="" bh_toml_bak="" bh_unit_bak="" had_bh_unit=0 had_bh_toml=0
+      if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
+      if [ -f "$CLIENT_TOML" ]; then cli_bak="$(rth_mktemp)" || return 1; cp -a "$CLIENT_TOML" "$cli_bak" || return 1; fi
+      if [ -f "$BH_TOML" ]; then bh_toml_bak="$(rth_mktemp)" || return 1; cp -a "$BH_TOML" "$bh_toml_bak" || return 1; had_bh_toml=1; fi
+      if [ -f "$BH_CLI_UNIT" ]; then bh_unit_bak="$(rth_mktemp)" || return 1; cp -a "$BH_CLI_UNIT" "$bh_unit_bak" || return 1; had_bh_unit=1; fi
+
+      _bh_off_rollback(){
+        [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$ENV_FILE" 2>/dev/null || true
+        [ -n "$cli_bak" ] && [ -f "$cli_bak" ] && cp -a "$cli_bak" "$CLIENT_TOML" 2>/dev/null || true
+        if [ "$had_bh_toml" -eq 1 ] && [ -n "$bh_toml_bak" ] && [ -f "$bh_toml_bak" ]; then
+          cp -a "$bh_toml_bak" "$BH_TOML" 2>/dev/null || true
+        fi
+        if [ "$had_bh_unit" -eq 1 ] && [ -n "$bh_unit_bak" ] && [ -f "$bh_unit_bak" ]; then
+          cp -a "$bh_unit_bak" "$BH_CLI_UNIT" 2>/dev/null || true
+          systemctl daemon-reload 2>/dev/null || true
+          systemctl enable "$BH_CLI_SVC" 2>/dev/null || true
+          systemctl restart "$BH_CLI_SVC" 2>/dev/null || true
+        fi
+        rm -f "$env_bak" "$cli_bak" "$bh_toml_bak" "$bh_unit_bak" 2>/dev/null || true
+      }
+
+      systemctl stop "$BH_CLI_SVC" 2>/dev/null || true
+      systemctl disable "$BH_CLI_SVC" 2>/dev/null || true
+      rm -f "$BH_CLI_UNIT" "$BH_TOML"
+      if ! systemctl daemon-reload; then
+        _bh_off_rollback
+        err "daemon-reload shekast khord"
+        return 1
+      fi
       # pak kardan env-haye backhaul az node.env
       safe_kv_del "$ENV_FILE" BH_REMOTE BH_REMOTE_ADDR BH_TOKEN BH_TRANSPORT BH_PROFILE
       # bargasht be tunnel-e pishfarz (ws/443) va roshan kardan-e dobare-ye rathole-client.
       env_set TUNNEL ws
-      gen_client
-      restart_svc
+      if ! gen_client || ! restart_svc; then
+        _bh_off_rollback
+        err "bargasht be rathole-client shekast khord؛ amaliat rollback shod."
+        return 1
+      fi
+      rm -f "$env_bak" "$cli_bak" "$bh_toml_bak" "$bh_unit_bak" 2>/dev/null || true
       log "backhaul client khamoosh va hazf shod; tunnel be ws/443 bargasht."
       warn "rooye Iran ham 'ratholectl backhaul node <name> off' ra bezan ta service dobare be server.toml bargardad."
       ;;
@@ -1200,7 +1405,7 @@ gen_up_kcp_unit(){ # $1=id $2=remote $3=local $4=key $5=ds $6=ps $7=mode $8=sw $
   local unit; unit="$(up_kcp_unit "$id")"
   local udir; udir="$(dirname "$unit")"
   mkdir -p "$udir"
-  local tmp; tmp="$(mktemp "$udir/.up_kcp.XXXXXX" 2>/dev/null || mktemp)"
+  local tmp; tmp="$(mktemp "$udir/.up_kcp.XXXXXX" 2>/dev/null)" || { err "sakht-e temp file baraye unit shekast khord"; return 1; }
   chmod 644 "$tmp" 2>/dev/null || true
   cat > "$tmp" <<UNIT
 [Unit]
@@ -1217,8 +1422,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
-  mv -f "$tmp" "$unit" || { rm -f "$tmp"; die "jaye gozini-e unit shekast khord."; }
+  mv -f "$tmp" "$unit" || { rm -f "$tmp"; err "jaye gozini-e unit shekast khord."; return 1; }
   chmod 644 "$unit" 2>/dev/null || true
+  return 0
 }
 
 up_kcp_on(){ # $1=id $2=remote $3=key [profile]
@@ -1233,29 +1439,103 @@ up_kcp_on(){ # $1=id $2=remote $3=key [profile]
   local_ep="$(grep -oE '^KCP_LOCAL=127\.0\.0\.1:[0-9]+' "$(up_env "$id")" 2>/dev/null | cut -d= -f2)"
   [ -n "$local_ep" ] || local_ep="$(pick_kcp_local)"
   install_kcptun_client
-  gen_up_kcp_unit "$id" "$remote" "$local_ep" "$key" "$ds" "$ps" "$mode" "$sw" "$rw"
-  systemctl daemon-reload
-  systemctl enable "rathole-kcp-up-${id}" >/dev/null 2>&1
-  systemctl restart "rathole-kcp-up-${id}" 2>/dev/null
-  if systemctl is-active --quiet "rathole-kcp-up-${id}"; then
-    log "kcp upstream '$id' faal shod: $local_ep → UDP $remote (profile: $profile)."
-  else
-    err "rathole-kcp-up-${id} bala niamd; log: journalctl -u rathole-kcp-up-${id} -n 30"; return 1
+
+  local env_f; env_f="$(up_env "$id")"
+  local toml_f; toml_f="$(up_toml "$id")"
+  local unit_f; unit_f="$(up_kcp_unit "$id")"
+  local env_bak="" toml_bak="" unit_bak="" had_unit=0
+  if [ -f "$env_f" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$env_f" "$env_bak" || return 1; fi
+  if [ -f "$toml_f" ]; then toml_bak="$(rth_mktemp)" || return 1; cp -a "$toml_f" "$toml_bak" || return 1; fi
+  if [ -f "$unit_f" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$unit_f" "$unit_bak" || return 1; had_unit=1; fi
+
+  _up_kcp_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$env_f" 2>/dev/null || true
+    [ -n "$toml_bak" ] && [ -f "$toml_bak" ] && cp -a "$toml_bak" "$toml_f" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$unit_f" 2>/dev/null || true
+    else
+      systemctl stop "rathole-kcp-up-${id}" 2>/dev/null || true
+      systemctl disable "rathole-kcp-up-${id}" 2>/dev/null || true
+      rm -f "$unit_f" 2>/dev/null || true
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
+    up_restart "$id" 2>/dev/null || true
+  }
+
+  if ! gen_up_kcp_unit "$id" "$remote" "$local_ep" "$key" "$ds" "$ps" "$mode" "$sw" "$rw"; then
+    _up_kcp_rollback
+    err "sakht-e unit-e kcp upstream shekast khord"
+    return 1
   fi
-  kv_set "$(up_env "$id")" TUNNEL kcp
-  kv_set "$(up_env "$id")" KCP_LOCAL "$local_ep"
-  kv_set "$(up_env "$id")" KCP_REMOTE "$remote"
-  kv_set "$(up_env "$id")" KCP_PROFILE "$profile"
-  up_restart "$id"
+  if ! systemctl daemon-reload; then
+    _up_kcp_rollback
+    err "daemon-reload shekast khord"
+    return 1
+  fi
+  if ! systemctl enable "rathole-kcp-up-${id}" >/dev/null 2>&1; then
+    _up_kcp_rollback
+    err "enable-e rathole-kcp-up-${id} shekast khord"
+    return 1
+  fi
+  if ! systemctl restart "rathole-kcp-up-${id}" 2>/dev/null || ! systemctl is-active --quiet "rathole-kcp-up-${id}"; then
+    _up_kcp_rollback
+    err "rathole-kcp-up-${id} bala niamd ya restart shekast khord; log: journalctl -u rathole-kcp-up-${id} -n 30"
+    return 1
+  fi
+  log "kcp upstream '$id' faal shod: $local_ep → UDP $remote (profile: $profile)."
+
+  kv_set "$env_f" TUNNEL kcp
+  kv_set "$env_f" KCP_LOCAL "$local_ep"
+  kv_set "$env_f" KCP_REMOTE "$remote"
+  kv_set "$env_f" KCP_PROFILE "$profile"
+  if ! up_restart "$id"; then
+    _up_kcp_rollback
+    err "up_restart baraye '$id' shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
   log "upstream '$id' be masir kcp/UDP+FEC switch shod."
 }
 
 up_kcp_off(){ # $1=id
   local id="$1"
-  systemctl disable --now "rathole-kcp-up-${id}" 2>/dev/null || true
-  rm -f "$(up_kcp_unit "$id")"; systemctl daemon-reload 2>/dev/null || true
-  kv_set "$(up_env "$id")" TUNNEL ws
-  up_restart "$id"
+  local env_f; env_f="$(up_env "$id")"
+  local toml_f; toml_f="$(up_toml "$id")"
+  local unit_f; unit_f="$(up_kcp_unit "$id")"
+  local env_bak="" toml_bak="" unit_bak="" had_unit=0
+  if [ -f "$env_f" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$env_f" "$env_bak" || return 1; fi
+  if [ -f "$toml_f" ]; then toml_bak="$(rth_mktemp)" || return 1; cp -a "$toml_f" "$toml_bak" || return 1; fi
+  if [ -f "$unit_f" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$unit_f" "$unit_bak" || return 1; had_unit=1; fi
+
+  _up_kcp_off_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$env_f" 2>/dev/null || true
+    [ -n "$toml_bak" ] && [ -f "$toml_bak" ] && cp -a "$toml_bak" "$toml_f" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$unit_f" 2>/dev/null || true
+      systemctl daemon-reload 2>/dev/null || true
+      systemctl enable "rathole-kcp-up-${id}" 2>/dev/null || true
+      systemctl restart "rathole-kcp-up-${id}" 2>/dev/null || true
+    fi
+    rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
+    up_restart "$id" 2>/dev/null || true
+  }
+
+  systemctl stop "rathole-kcp-up-${id}" 2>/dev/null || true
+  systemctl disable "rathole-kcp-up-${id}" 2>/dev/null || true
+  rm -f "$unit_f"
+  if ! systemctl daemon-reload; then
+    _up_kcp_off_rollback
+    err "daemon-reload shekast khord"
+    return 1
+  fi
+  kv_set "$env_f" TUNNEL ws
+  if ! up_restart "$id"; then
+    _up_kcp_off_rollback
+    err "up_restart baraye '$id' shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
   log "upstream '$id' be websocket/443 bargasht."
 }
 
@@ -1282,12 +1562,38 @@ up_plain_on(){ # $1=id $2=remote(host:port)
   local id="$1" remote="$2"
   [ -n "$remote" ] || die "estefade: ratholenode upstream plain <id> on <iran_host:port>"
   echo "$remote" | grep -qE '^[A-Za-z0-9_.-]+:[0-9]+$' || die "adres bayad HOST:PORT bashad."
+
+  local env_f; env_f="$(up_env "$id")"
+  local toml_f; toml_f="$(up_toml "$id")"
+  local unit_f; unit_f="$(up_kcp_unit "$id")"
+  local env_bak="" toml_bak="" unit_bak="" had_unit=0
+  if [ -f "$env_f" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$env_f" "$env_bak" || return 1; fi
+  if [ -f "$toml_f" ]; then toml_bak="$(rth_mktemp)" || return 1; cp -a "$toml_f" "$toml_bak" || return 1; fi
+  if [ -f "$unit_f" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$unit_f" "$unit_bak" || return 1; had_unit=1; fi
+
+  _up_plain_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$env_f" 2>/dev/null || true
+    [ -n "$toml_bak" ] && [ -f "$toml_bak" ] && cp -a "$toml_bak" "$toml_f" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$unit_f" 2>/dev/null || true
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
+    up_restart "$id" 2>/dev/null || true
+  }
+
   # kcp-e in upstream (agar bood) bayad khamoosh shavad — har upstream YEK hamel darad.
-  systemctl disable --now "rathole-kcp-up-${id}" 2>/dev/null || true
-  rm -f "$(up_kcp_unit "$id")"; systemctl daemon-reload 2>/dev/null || true
-  kv_set "$(up_env "$id")" TUNNEL plain
-  kv_set "$(up_env "$id")" PLAIN_REMOTE "$remote"
-  up_restart "$id"
+  systemctl stop "rathole-kcp-up-${id}" 2>/dev/null || true
+  systemctl disable "rathole-kcp-up-${id}" 2>/dev/null || true
+  rm -f "$unit_f"; systemctl daemon-reload 2>/dev/null || true
+  kv_set "$env_f" TUNNEL plain
+  kv_set "$env_f" PLAIN_REMOTE "$remote"
+  if ! up_restart "$id"; then
+    _up_plain_rollback
+    err "up_restart baraye '$id' shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
   log "upstream '$id' be halat plain (websocket bedoon TLS → $remote) switch shod."
 }
 
@@ -1296,23 +1602,74 @@ up_noise_on(){ # $1=id $2=remote(host:port) $3=pubkey [pattern]
   [ -n "$remote" ] && [ -n "$pubkey" ] || die "estefade: ratholenode upstream noise <id> on <iran_host:port> <pubkey> [pattern]"
   echo "$remote" | grep -qE '^[A-Za-z0-9_.-]+:[0-9]+$' || die "adres bayad HOST:PORT bashad."
   echo "$pubkey" | grep -qE '^[A-Za-z0-9+/=]{40,64}$' || die "pubkey-e noise namotabar (base64)."
-  systemctl disable --now "rathole-kcp-up-${id}" 2>/dev/null || true
-  rm -f "$(up_kcp_unit "$id")"; systemctl daemon-reload 2>/dev/null || true
-  kv_set "$(up_env "$id")" TUNNEL noise
-  kv_set "$(up_env "$id")" NOISE_REMOTE "$remote"
-  kv_set "$(up_env "$id")" NOISE_PUBKEY "$pubkey"
-  [ -n "$pattern" ] && kv_set "$(up_env "$id")" NOISE_PATTERN "$pattern"
-  up_restart "$id"
+
+  local env_f; env_f="$(up_env "$id")"
+  local toml_f; toml_f="$(up_toml "$id")"
+  local unit_f; unit_f="$(up_kcp_unit "$id")"
+  local env_bak="" toml_bak="" unit_bak="" had_unit=0
+  if [ -f "$env_f" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$env_f" "$env_bak" || return 1; fi
+  if [ -f "$toml_f" ]; then toml_bak="$(rth_mktemp)" || return 1; cp -a "$toml_f" "$toml_bak" || return 1; fi
+  if [ -f "$unit_f" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$unit_f" "$unit_bak" || return 1; had_unit=1; fi
+
+  _up_noise_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$env_f" 2>/dev/null || true
+    [ -n "$toml_bak" ] && [ -f "$toml_bak" ] && cp -a "$toml_bak" "$toml_f" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$unit_f" 2>/dev/null || true
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
+    up_restart "$id" 2>/dev/null || true
+  }
+
+  systemctl stop "rathole-kcp-up-${id}" 2>/dev/null || true
+  systemctl disable "rathole-kcp-up-${id}" 2>/dev/null || true
+  rm -f "$unit_f"; systemctl daemon-reload 2>/dev/null || true
+  kv_set "$env_f" TUNNEL noise
+  kv_set "$env_f" NOISE_REMOTE "$remote"
+  kv_set "$env_f" NOISE_PUBKEY "$pubkey"
+  [ -n "$pattern" ] && kv_set "$env_f" NOISE_PATTERN "$pattern"
+  if ! up_restart "$id"; then
+    _up_noise_rollback
+    err "up_restart baraye '$id' shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
   log "upstream '$id' be halat noise (ramznegari-shode → $remote) switch shod."
 }
 
 # bargasht be ws/443 az HAR halati (plain/noise/kcp).
 up_ws_on(){ # $1=id
   local id="$1"
-  systemctl disable --now "rathole-kcp-up-${id}" 2>/dev/null || true
-  rm -f "$(up_kcp_unit "$id")"; systemctl daemon-reload 2>/dev/null || true
-  kv_set "$(up_env "$id")" TUNNEL ws
-  up_restart "$id"
+  local env_f; env_f="$(up_env "$id")"
+  local toml_f; toml_f="$(up_toml "$id")"
+  local unit_f; unit_f="$(up_kcp_unit "$id")"
+  local env_bak="" toml_bak="" unit_bak="" had_unit=0
+  if [ -f "$env_f" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$env_f" "$env_bak" || return 1; fi
+  if [ -f "$toml_f" ]; then toml_bak="$(rth_mktemp)" || return 1; cp -a "$toml_f" "$toml_bak" || return 1; fi
+  if [ -f "$unit_f" ]; then unit_bak="$(rth_mktemp)" || return 1; cp -a "$unit_f" "$unit_bak" || return 1; had_unit=1; fi
+
+  _up_ws_rollback(){
+    [ -n "$env_bak" ] && [ -f "$env_bak" ] && cp -a "$env_bak" "$env_f" 2>/dev/null || true
+    [ -n "$toml_bak" ] && [ -f "$toml_bak" ] && cp -a "$toml_bak" "$toml_f" 2>/dev/null || true
+    if [ "$had_unit" -eq 1 ] && [ -n "$unit_bak" ] && [ -f "$unit_bak" ]; then
+      cp -a "$unit_bak" "$unit_f" 2>/dev/null || true
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
+    up_restart "$id" 2>/dev/null || true
+  }
+
+  systemctl stop "rathole-kcp-up-${id}" 2>/dev/null || true
+  systemctl disable "rathole-kcp-up-${id}" 2>/dev/null || true
+  rm -f "$unit_f"; systemctl daemon-reload 2>/dev/null || true
+  kv_set "$env_f" TUNNEL ws
+  if ! up_restart "$id"; then
+    _up_ws_rollback
+    err "up_restart baraye '$id' shekast khord؛ amaliat rollback shod."
+    return 1
+  fi
+  rm -f "$env_bak" "$toml_bak" "$unit_bak" 2>/dev/null || true
   log "upstream '$id' be websocket/443 (pishfarz) bargasht."
 }
 

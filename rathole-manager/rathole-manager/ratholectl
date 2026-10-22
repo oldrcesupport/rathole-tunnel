@@ -35,8 +35,12 @@ BH_UNIT="/etc/systemd/system/${BH_SVC}.service"
 # Temp-ha ba permission 0600 dar haman filesystem-e maghsad sakhte mishavand
 rth_mktemp(){
   local dir="${1:-}"
-  [ -n "$dir" ] && [ -d "$dir" ] || dir="$(dirname "$STATE" 2>/dev/null || echo /tmp)"
-  [ -d "$dir" ] || dir="/tmp"
+  if [ -n "$dir" ]; then
+    [ -d "$dir" ] || return 1
+  else
+    dir="$(dirname "$STATE" 2>/dev/null || echo "")"
+    [ -n "$dir" ] && [ -d "$dir" ] || dir="/tmp"
+  fi
   local tmp
   tmp="$(mktemp "$dir/rth.tmp.XXXXXX")" || return 1
   chmod 600 "$tmp" 2>/dev/null || true
@@ -44,7 +48,11 @@ rth_mktemp(){
 }
 rth_mktempd(){
   local dir="${1:-}"
-  [ -n "$dir" ] && [ -d "$dir" ] || dir="/tmp"
+  if [ -n "$dir" ]; then
+    [ -d "$dir" ] || return 1
+  else
+    dir="/tmp"
+  fi
   local tmpd
   tmpd="$(mktemp -d "$dir/rthd.tmp.XXXXXX")" || return 1
   chmod 700 "$tmpd" 2>/dev/null || true
@@ -79,9 +87,17 @@ rth_state_tx(){
     err "khorooji-e jq JSON-e motabar nist؛ state dast-nakhorde mand."
     return 1
   fi
-  if ! jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+  if ! jq -e '
+    type == "object"
+    and (.nodes | type == "array")
+    and all(.nodes[]; type == "object" and (.name | type == "string" and length > 0) and (.token | type == "string" and length > 0))
+    and ((.domain == null) or (.domain | type == "string"))
+    and ((.domains == null) or (.domains | type == "array"))
+    and ((.extra_domains == null) or (.extra_domains | type == "array"))
+    and ((.control_port == null) or (.control_port | type == "number"))
+  ' "$tmp" >/dev/null 2>&1; then
     rm -f "$tmp"
-    err "khorooji-e jq yek JSON object nist؛ state dast-nakhorde mand."
+    err "khorooji-e jq schema-ye motabar-e state ra nadarad؛ state dast-nakhorde mand."
     return 1
   fi
   if ! mv -f "$tmp" "$STATE"; then
@@ -227,11 +243,23 @@ cmd_restore(){
   local st; st="$(find "$tmp" -name state.json -print -quit 2>/dev/null)"
   [ -n "$st" ] || die "state.json dar backup nist."
   jq -e . "$st" >/dev/null 2>&1 || die "state.json namotabar ast."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
   mkdir -p "$(dirname "$STATE")"
   cp -f "$st" "$STATE"
   rm -rf "$tmp"
   log "state restore shod az: $f (damnh: $(s_get '.domain') , nodeha: $(jq '.nodes|length' "$STATE"))"
-  regenerate
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "restore shekast khord va be state/config-e ghabli rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   systemctl enable --now "$RATHOLE_SVC" 2>/dev/null || true
   log "restore kamel shod. nodeha ba haman tokenha bedoon taghir dvbarh vsl mishavand."
   warn "motmaen shv gvahiha dar masir dakhl state mvjvdnd (dar ghir ainsvrt dvbarh begir)."
@@ -451,9 +479,25 @@ cmd_add(){
   fi
 
   # faghat agar neveshtan-e state movafagh bood, success log/regenerate anjam shavad.
-  rth_state_tx --argjson node "$node_json" '.nodes += [$node]' || die "sabt-e node dar state shekast khord."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+
+  if ! rth_state_tx --argjson node "$node_json" '.nodes += [$node]'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "sabt-e node dar state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "afzoodan-e node shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "node '$name' ezafe shod (path=/$name → 127.0.0.1:$dport)."
-  regenerate
   print_node_install "$name"
 }
 
@@ -463,9 +507,25 @@ cmd_rm(){
   local name="${1:-}"
   [ -n "$name" ] || die "estefade: ratholectl rm <name>"
   jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
-  rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))' || die "hazf-e node az state shekast khord."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+
+  if ! rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "hazf-e node az state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "hazf-e node shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "node '$name' hazf shod."
-  regenerate
 }
 
 # ---------- dstvr ls ----------
@@ -1236,82 +1296,233 @@ gen_stream_conf(){
 # ---------- regenerate + reload ----------
 regenerate(){
   need_root
+  local pre_state_bak="${1:-}"
+  local clean_pre_state_on_exit=0
   local out; out="$(jq -r '.nginx_conf // empty' "$STATE" 2>/dev/null)"; [ -n "$out" ] || out="$NGINX_CONF"
   local nc="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
 
-  # Snapshots of pre-existing files (HTTP, Stream, Main Nginx, and server.toml)
+  # Snapshots of all pre-existing files (State, HTTP, Stream, Main Nginx, server.toml, noise, backhaul)
   local pre_http_bak="" pre_stream_bak="" pre_main_bak="" pre_server_toml_bak=""
+  local pre_noise_toml_bak="" pre_noise_unit_bak="" pre_bh_toml_bak="" pre_bh_unit_bak=""
   local had_http=0 had_stream=0 had_main=0 had_server_toml=0
+  local had_noise_toml=0 had_noise_unit=0 had_bh_toml=0 had_bh_unit=0 had_state=0
 
+  _cleanup_snapshots(){
+    rm -f "$pre_http_bak" "$pre_stream_bak" "$pre_main_bak" "$pre_server_toml_bak" \
+          "$pre_noise_toml_bak" "$pre_noise_unit_bak" "$pre_bh_toml_bak" "$pre_bh_unit_bak" 2>/dev/null || true
+    if [ "$clean_pre_state_on_exit" -eq 1 ] && [ -n "$pre_state_bak" ]; then
+      rm -f "$pre_state_bak" 2>/dev/null || true
+    fi
+  }
+
+  if [ -f "$STATE" ]; then
+    had_state=1
+    if [ -z "$pre_state_bak" ]; then
+      pre_state_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e state shekast khord"; return 1; }
+      if ! cp -a "$STATE" "$pre_state_bak"; then
+        rm -f "$pre_state_bak" 2>/dev/null || true
+        err "copy-e snapshot-e state shekast khord"
+        return 1
+      fi
+      clean_pre_state_on_exit=1
+    fi
+  fi
+
+  # RULE: Shekaste sakhte HAR snapshot bayad PISH AZ HAR TAGHIR amaliat ra motavaghef konad!
   if [ -f "$out" ]; then
-    pre_http_bak="$(rth_mktemp)" || return 1
-    cp -a "$out" "$pre_http_bak" && had_http=1
+    had_http=1
+    pre_http_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e http shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$out" "$pre_http_bak"; then
+      rm -f "$pre_http_bak" 2>/dev/null || true
+      err "copy-e snapshot-e http shekast khord"; _cleanup_snapshots; return 1
+    fi
   fi
+
   if [ -f "$STREAM_CONF" ]; then
-    pre_stream_bak="$(rth_mktemp)" || return 1
-    cp -a "$STREAM_CONF" "$pre_stream_bak" && had_stream=1
+    had_stream=1
+    pre_stream_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e stream shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$STREAM_CONF" "$pre_stream_bak"; then
+      rm -f "$pre_stream_bak" 2>/dev/null || true
+      err "copy-e snapshot-e stream shekast khord"; _cleanup_snapshots; return 1
+    fi
   fi
+
   if [ -f "$nc" ]; then
-    pre_main_bak="$(rth_mktemp)" || return 1
-    cp -a "$nc" "$pre_main_bak" && had_main=1
+    had_main=1
+    pre_main_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e main nginx shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$nc" "$pre_main_bak"; then
+      rm -f "$pre_main_bak" 2>/dev/null || true
+      err "copy-e snapshot-e main nginx shekast khord"; _cleanup_snapshots; return 1
+    fi
   fi
+
   if [ -f "$SERVER_TOML" ]; then
-    pre_server_toml_bak="$(rth_mktemp)" || return 1
-    cp -a "$SERVER_TOML" "$pre_server_toml_bak" && had_server_toml=1
+    had_server_toml=1
+    pre_server_toml_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e server.toml shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$SERVER_TOML" "$pre_server_toml_bak"; then
+      rm -f "$pre_server_toml_bak" 2>/dev/null || true
+      err "copy-e snapshot-e server.toml shekast khord"; _cleanup_snapshots; return 1
+    fi
+  fi
+
+  if [ -f "$NOISE_TOML" ]; then
+    had_noise_toml=1
+    pre_noise_toml_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e noise.toml shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$NOISE_TOML" "$pre_noise_toml_bak"; then
+      rm -f "$pre_noise_toml_bak" 2>/dev/null || true
+      err "copy-e snapshot-e noise.toml shekast khord"; _cleanup_snapshots; return 1
+    fi
+  fi
+
+  if [ -f "$NOISE_UNIT" ]; then
+    had_noise_unit=1
+    pre_noise_unit_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e noise.service shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$NOISE_UNIT" "$pre_noise_unit_bak"; then
+      rm -f "$pre_noise_unit_bak" 2>/dev/null || true
+      err "copy-e snapshot-e noise.service shekast khord"; _cleanup_snapshots; return 1
+    fi
+  fi
+
+  if [ -f "$BH_TOML" ]; then
+    had_bh_toml=1
+    pre_bh_toml_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e bh.toml shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$BH_TOML" "$pre_bh_toml_bak"; then
+      rm -f "$pre_bh_toml_bak" 2>/dev/null || true
+      err "copy-e snapshot-e bh.toml shekast khord"; _cleanup_snapshots; return 1
+    fi
+  fi
+
+  if [ -f "$BH_UNIT" ]; then
+    had_bh_unit=1
+    pre_bh_unit_bak="$(rth_mktemp)" || { err "sakht-e snapshot-e bh.service shekast khord"; _cleanup_snapshots; return 1; }
+    if ! cp -a "$BH_UNIT" "$pre_bh_unit_bak"; then
+      rm -f "$pre_bh_unit_bak" 2>/dev/null || true
+      err "copy-e snapshot-e bh.service shekast khord"; _cleanup_snapshots; return 1
+    fi
   fi
 
   _rollback_configs(){
     local rb_failed=0
-    # Restore HTTP
-    if [ "$had_http" -eq 1 ] && [ -n "$pre_http_bak" ] && [ -f "$pre_http_bak" ]; then
-      cp -a "$pre_http_bak" "$out" || rb_failed=1
-    elif [ "$had_http" -eq 0 ]; then
-      rm -f "$out" 2>/dev/null
+    export RTH_IN_ROLLBACK=1
+    # 1. Restore State
+    if [ -n "$pre_state_bak" ] && [ -f "$pre_state_bak" ]; then
+      if [ "$had_state" -eq 1 ]; then
+        cp -a "$pre_state_bak" "$STATE" || rb_failed=1
+      else
+        rm -f "$STATE" 2>/dev/null || rb_failed=1
+      fi
     fi
-    # Restore Stream
-    if [ "$had_stream" -eq 1 ] && [ -n "$pre_stream_bak" ] && [ -f "$pre_stream_bak" ]; then
-      cp -a "$pre_stream_bak" "$STREAM_CONF" || rb_failed=1
-    elif [ "$had_stream" -eq 0 ]; then
-      rm -f "$STREAM_CONF" 2>/dev/null
+    # 2. Restore HTTP
+    if [ "$had_http" -eq 1 ]; then
+      if [ -n "$pre_http_bak" ] && [ -f "$pre_http_bak" ]; then
+        cp -a "$pre_http_bak" "$out" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$out" 2>/dev/null || true
     fi
-    # Restore Main Nginx
-    if [ "$had_main" -eq 1 ] && [ -n "$pre_main_bak" ] && [ -f "$pre_main_bak" ]; then
-      cp -a "$pre_main_bak" "$nc" || rb_failed=1
+    # 3. Restore Stream
+    if [ "$had_stream" -eq 1 ]; then
+      if [ -n "$pre_stream_bak" ] && [ -f "$pre_stream_bak" ]; then
+        cp -a "$pre_stream_bak" "$STREAM_CONF" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$STREAM_CONF" 2>/dev/null || true
     fi
-    # Restore Server TOML
-    if [ "$had_server_toml" -eq 1 ] && [ -n "$pre_server_toml_bak" ] && [ -f "$pre_server_toml_bak" ]; then
-      cp -a "$pre_server_toml_bak" "$SERVER_TOML" || rb_failed=1
-    elif [ "$had_server_toml" -eq 0 ]; then
-      rm -f "$SERVER_TOML" 2>/dev/null
+    # 4. Restore Main Nginx
+    if [ "$had_main" -eq 1 ]; then
+      if [ -n "$pre_main_bak" ] && [ -f "$pre_main_bak" ]; then
+        cp -a "$pre_main_bak" "$nc" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    fi
+    # 5. Restore Server TOML
+    if [ "$had_server_toml" -eq 1 ]; then
+      if [ -n "$pre_server_toml_bak" ] && [ -f "$pre_server_toml_bak" ]; then
+        cp -a "$pre_server_toml_bak" "$SERVER_TOML" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$SERVER_TOML" 2>/dev/null || true
+    fi
+    # 6. Restore Noise TOML
+    if [ "$had_noise_toml" -eq 1 ]; then
+      if [ -n "$pre_noise_toml_bak" ] && [ -f "$pre_noise_toml_bak" ]; then
+        cp -a "$pre_noise_toml_bak" "$NOISE_TOML" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$NOISE_TOML" 2>/dev/null || true
+    fi
+    # 7. Restore Noise Unit
+    if [ "$had_noise_unit" -eq 1 ]; then
+      if [ -n "$pre_noise_unit_bak" ] && [ -f "$pre_noise_unit_bak" ]; then
+        cp -a "$pre_noise_unit_bak" "$NOISE_UNIT" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$NOISE_UNIT" 2>/dev/null || true
+    fi
+    # 8. Restore Backhaul TOML
+    if [ "$had_bh_toml" -eq 1 ]; then
+      if [ -n "$pre_bh_toml_bak" ] && [ -f "$pre_bh_toml_bak" ]; then
+        cp -a "$pre_bh_toml_bak" "$BH_TOML" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$BH_TOML" 2>/dev/null || true
+    fi
+    # 9. Restore Backhaul Unit
+    if [ "$had_bh_unit" -eq 1 ]; then
+      if [ -n "$pre_bh_unit_bak" ] && [ -f "$pre_bh_unit_bak" ]; then
+        cp -a "$pre_bh_unit_bak" "$BH_UNIT" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$BH_UNIT" 2>/dev/null || true
     fi
 
+    # Daemon-reload if units were touched
+    systemctl daemon-reload 2>/dev/null || true
+
     if [ "$rb_failed" -eq 1 ]; then
-      err "HOSHDAR-E BOZORG: bazgardandan-e file-haye config shekast khord! masirha: $out , $STREAM_CONF , $nc"
+      unset RTH_IN_ROLLBACK || true
+      err "HOSHDAR-E BOZORG: bazgardandan-e file-haye config/state ba khata movajeh shod!"
       return 1
     fi
 
     # Try reloading restored config if nginx exists
     if command -v nginx >/dev/null 2>&1; then
       if nginx -t >/dev/null 2>&1; then
-        if systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null; then
+        if systemctl reload nginx 2>/dev/null || { systemctl restart nginx 2>/dev/null && systemctl is-active --quiet nginx; }; then
           if ! systemctl is-active --quiet nginx; then
+            unset RTH_IN_ROLLBACK || true
             err "HOSHDAR: config ghabli bazgardande shod ama nginx faal nist."
             return 1
           fi
         else
+          unset RTH_IN_ROLLBACK || true
           err "HOSHDAR: config ghabli bazgardande shod ama reload-e an shekast khord."
           return 1
         fi
       else
+        unset RTH_IN_ROLLBACK || true
         err "HOSHDAR: config-e ghabli ham dar nginx -t khata dad; niaz be barresi-ye dasti darad."
         return 1
       fi
     fi
+    unset RTH_IN_ROLLBACK || true
+    log "amaliat ba movafaghiat rollback shod (state va config-ha be noskhe-ye ghabli bazgardande shodand)."
     return 0
-  }
-
-  _cleanup_snapshots(){
-    rm -f "$pre_http_bak" "$pre_stream_bak" "$pre_main_bak" "$pre_server_toml_bak" 2>/dev/null || true
   }
 
   if ! gen_server_toml || ! gen_nginx_conf; then
@@ -1339,17 +1550,22 @@ regenerate(){
     rm -f "$test_log" 2>/dev/null
 
     local nginx_reloaded=0
-    if systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null; then
+    if systemctl reload nginx 2>/dev/null; then
       if systemctl is-active --quiet nginx; then
         nginx_reloaded=1
-        log "nginx reload shod va faal ast."
-        cp -a "$out" "$out.rathole-good.bak" 2>/dev/null || true
-        [ -f "$STREAM_CONF" ] && cp -a "$STREAM_CONF" "$STREAM_CONF.rathole-good.bak" 2>/dev/null || true
-        [ -f "$STREAM_CONF" ] || rm -f "$STREAM_CONF.rathole-good.bak" 2>/dev/null
+      fi
+    elif systemctl restart nginx 2>/dev/null; then
+      if systemctl is-active --quiet nginx; then
+        nginx_reloaded=1
       fi
     fi
 
-    if [ "$nginx_reloaded" -ne 1 ]; then
+    if [ "$nginx_reloaded" -eq 1 ]; then
+      log "nginx reload shod va faal ast."
+      cp -a "$out" "$out.rathole-good.bak" 2>/dev/null || true
+      [ -f "$STREAM_CONF" ] && cp -a "$STREAM_CONF" "$STREAM_CONF.rathole-good.bak" 2>/dev/null || true
+      [ -f "$STREAM_CONF" ] || rm -f "$STREAM_CONF.rathole-good.bak" 2>/dev/null
+    else
       err "reload va restart-e nginx shekast khord ya service faal nist; rolling back..."
       if _rollback_configs; then
         err "config ghabli ba movafaghiat bazgardande shod."
@@ -1380,16 +1596,20 @@ regenerate(){
     ensure_noise_unit
     gen_noise_server_toml
     log "noise-server.toml berooz shd ($NOISE_TOML)."
-    systemctl enable "$NOISE_SVC" >/dev/null 2>&1 || true
-    if systemctl list-unit-files 2>/dev/null | grep -q "^${NOISE_SVC}.service"; then
-      if ! systemctl restart "$NOISE_SVC" 2>/dev/null || ! systemctl is-active --quiet "$NOISE_SVC"; then
-        err "ntvanstm $NOISE_SVC ra restart knm ya service faal nashod."
-        _rollback_configs
-        _cleanup_snapshots
-        return 1
-      fi
-      log "$NOISE_SVC restart shod."
+    systemctl daemon-reload 2>/dev/null || true
+    if ! systemctl enable "$NOISE_SVC" >/dev/null 2>&1; then
+      err "enable kardan-e $NOISE_SVC shekast khord."
+      _rollback_configs
+      _cleanup_snapshots
+      return 1
     fi
+    if ! systemctl restart "$NOISE_SVC" 2>/dev/null || ! systemctl is-active --quiet "$NOISE_SVC"; then
+      err "ntvanstm $NOISE_SVC ra restart knm ya service faal nashod."
+      _rollback_configs
+      _cleanup_snapshots
+      return 1
+    fi
+    log "$NOISE_SVC restart shod."
   fi
 
   # instans-e backhaul (agar roshan bashad)
@@ -1397,16 +1617,20 @@ regenerate(){
   if [ -n "$bhp" ] && [ "$bhp" != null ]; then
     ensure_backhaul_unit
     gen_backhaul_server_toml
-    systemctl enable "$BH_SVC" >/dev/null 2>&1 || true
-    if systemctl list-unit-files 2>/dev/null | grep -q "^${BH_SVC}.service"; then
-      if ! systemctl restart "$BH_SVC" 2>/dev/null || ! systemctl is-active --quiet "$BH_SVC"; then
-        err "ntvanstm $BH_SVC ra restart knm ya service faal nashod."
-        _rollback_configs
-        _cleanup_snapshots
-        return 1
-      fi
-      log "$BH_SVC restart shod."
+    systemctl daemon-reload 2>/dev/null || true
+    if ! systemctl enable "$BH_SVC" >/dev/null 2>&1; then
+      err "enable kardan-e $BH_SVC shekast khord."
+      _rollback_configs
+      _cleanup_snapshots
+      return 1
     fi
+    if ! systemctl restart "$BH_SVC" 2>/dev/null || ! systemctl is-active --quiet "$BH_SVC"; then
+      err "ntvanstm $BH_SVC ra restart knm ya service faal nashod."
+      _rollback_configs
+      _cleanup_snapshots
+      return 1
+    fi
+    log "$BH_SVC restart shod."
   fi
 
   _cleanup_snapshots
@@ -1468,6 +1692,14 @@ cmd_set(){
   need_root; need_bin jq; ensure_state
   local key="${1:-}" val="${2:-}"
   [ -n "$key" ] && [ -n "$val" ] || die "estefade: ratholectl set <domain|fullchain|key|nginx-conf|fake-port|sub-port|control-port|sub-path|hub-path> <value>"
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
   case "$key" in
     domain)        state_set '.domain' "$val" str ;;
     fullchain)     state_set '.cert_fullchain' "$val" str ;;
@@ -1479,10 +1711,14 @@ cmd_set(){
     control-path) state_set '.control_path' "$val" str ;;
     sub-path)      state_set '.sub_path' "$(normalize_path_seg "$val")" str ;;
     hub-path)      state_set '.hub_path' "$(normalize_path_seg "$val")" str ;;
-    *) die "kelid nashenakhte: $key" ;;
+    *) [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true; die "kelid nashenakhte: $key" ;;
   esac
   log "tanzim shod: $key = $val"
-  regenerate
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "amaliat-e set shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
 }
 
 # virayesh yek node: ratholectl edit <name> [--inbound N] [--api-port N|off]
@@ -1546,10 +1782,26 @@ cmd_edit(){
   done
   jq_filter="${jq_filter}${combined_mut})"
 
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+
   # emal-e atomic
-  rth_state_tx "${jq_args[@]}" "$jq_filter" || die "virayesh-e node shekast khord؛ state dast-nakhorde mand."
+  if ! rth_state_tx "${jq_args[@]}" "$jq_filter"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "virayesh-e node shekast khord؛ state dast-nakhorde mand."
+  fi
   log "node '$name' virayesh shod."
-  regenerate
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "virayesh-e node shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   print_node_install "$name"
 }
 
@@ -1563,12 +1815,25 @@ cmd_rename(){
   jq -e --arg n "$old" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$old' peyda nashod."
   jq -e --arg n "$new" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null && die "name '$new' ghblaan vojood darad."
   local is_game; is_game="$(jq -r --arg n "$old" '.nodes[]|select(.name==$n)|.sni // empty' "$STATE")"
-  rth_state_tx --arg o "$old" --arg n "$new" '(.nodes[]|select(.name==$o)|.name) |= $n' || die "taghir name-e node shekast khord."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if ! rth_state_tx --arg o "$old" --arg n "$new" '(.nodes[]|select(.name==$o)|.name) |= $n'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "taghir name-e node shekast khord."
+  fi
   warn "masir karbar az /$old be /$new taghir krd; config karbaran va path inbound Xray node ra ham beroozresani kon."
-  # MOHEM: rathole service ra ba NAME juft mikonad. node hanooz service-e '$old' ra darad,
-  # pas tunnel ta zamani ke rooye node service ra rename nakoni ghat mimanad.
   warn "rooye node service ra ham rename kon (token sabet mimanad): 'ratholenode rm-svc $old' sps 'ratholenode add-svc $new <token> <inbound>' (ya baraye upstream, moadel-e upstream)."
-  regenerate
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "taghir name-e node shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   # dstvr-e nasb-e dorost bar asas-e no-e node (game=TLS/Vision , adi=WS)
   if [ -n "$is_game" ]; then print_game_install "$new"; else print_node_install "$new"; fi
 }
@@ -1581,16 +1846,34 @@ cmd_rotate(){
   jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
   local newt; newt="$(gen_token)"
   local has_api; has_api="$(jq -r --arg n "$name" '.nodes[]|select(.name==$n)|.api_token // empty' "$STATE")"
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
   if [ -n "$has_api" ]; then
     local new_apit; new_apit="$(gen_token)"
-    rth_state_tx --arg n "$name" --arg t "$newt" --arg at "$new_apit" \
-      '(.nodes[]|select(.name==$n)) |= (.token = $t | .api_token = $at)' || die "charkhesh-e token shekast khord."
+    if ! rth_state_tx --arg n "$name" --arg t "$newt" --arg at "$new_apit" \
+      '(.nodes[]|select(.name==$n)) |= (.token = $t | .api_token = $at)'; then
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+      die "charkhesh-e token shekast khord."
+    fi
   else
-    rth_state_tx --arg n "$name" --arg t "$newt" \
-      '(.nodes[]|select(.name==$n)|.token) |= $t' || die "charkhesh-e token shekast khord."
+    if ! rth_state_tx --arg n "$name" --arg t "$newt" \
+      '(.nodes[]|select(.name==$n)|.token) |= $t'; then
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+      die "charkhesh-e token shekast khord."
+    fi
   fi
   log "token node '$name' chrkhandh shod. rooye node bayad ba token jadid dvbarh nasb/beroozresani shavad."
-  regenerate
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "charkhesh-e token shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   print_node_install "$name"
 }
 
@@ -1680,14 +1963,11 @@ cmd_game_add(){
     '.nodes += [{name:$n, port:$p, inbound_port:$ib, token:$t, sni:$s}]' || { rm -f "$pre_game_state"; die "afzoodan-e service game be state shekast khord."; }
   log "service game '$name' ezafe shod (SNI=$sni → data 127.0.0.1:$dport , node inbound :$inbound)."
   warn "443 hala stream/SNI shd; L7 fali rooye port dakhli mntghl shod (karbaran path dstnkhvrdh)."
-  if ! regenerate; then
-    err "emal-e config baraye game '$name' shekast khord; rolling back state..."
-    cp -a "$pre_game_state" "$STATE" || err "bazgardandan-e state az snapshot shekast khord!"
-    rm -f "$pre_game_state"
-    regenerate 2>/dev/null || true
-    die "regenerate shekast khord; amaliat rollback shod."
+  if ! regenerate "$pre_game_state"; then
+    rm -f "$pre_game_state" 2>/dev/null || true
+    die "regenerate baraye game '$name' shekast khord; amaliat rollback shod."
   fi
-  rm -f "$pre_game_state"
+  rm -f "$pre_game_state" 2>/dev/null || true
   print_game_install "$name"
 }
 
@@ -1696,17 +1976,20 @@ cmd_game_rm(){
   [ -n "$name" ] || die "estefade: ratholectl game rm <name>"
   jq -e --arg n "$name" '.nodes[]|select(.name==$n and .sni!=null)' "$STATE" >/dev/null || die "service game '$name' peyda nashod."
   local pre_game_state; pre_game_state="$(rth_mktemp)" || die "sakht-e temp file baraye state shekast khord."
-  cp -a "$STATE" "$pre_game_state"
-  rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))' || { rm -f "$pre_game_state"; die "hazf-e service game az state shekast khord."; }
+  if ! cp -a "$STATE" "$pre_game_state"; then
+    rm -f "$pre_game_state" 2>/dev/null || true
+    die "copy snapshot-e state shekast khord."
+  fi
+  if ! rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))'; then
+    rm -f "$pre_game_state" 2>/dev/null || true
+    die "hazf-e service game az state shekast khord."
+  fi
   log "service game '$name' hazf shod."
-  if ! regenerate; then
-    err "regenerate shekast khord; rolling back state..."
-    cp -a "$pre_game_state" "$STATE" || err "bazgardandan-e state az snapshot shekast khord!"
-    rm -f "$pre_game_state"
-    regenerate 2>/dev/null || true
+  if ! regenerate "$pre_game_state"; then
+    rm -f "$pre_game_state" 2>/dev/null || true
     die "hazf az state anjam shod ama regenerate ba khata movajeh shod; amaliat rollback shod."
   fi
-  rm -f "$pre_game_state"
+  rm -f "$pre_game_state" 2>/dev/null || true
 }
 
 cmd_game_ls(){
@@ -2020,10 +2303,24 @@ PY
   if [ "$sni_count" -eq 0 ] && grep -rlsE 'listen[^;]*\bdefault_server\b' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null \
        | grep -vxF "$NGINX_CONF" | grep -q .; then ext_default=1; fi
   [ "$ext_default" -eq 0 ] || die "yek nginx default_server-e digar rooye 443 faal ast; aval tadakhol ra bartaraf kon."
-  rth_state_tx --arg ip "$ip" --arg fc "$fc" --arg key "$key" \
-     '.ip_tls = {ip:$ip, fullchain:$fc, key:$key, self_signed:true}' \
-     || die "zakhire IP TLS dar state shekast khord."
-  regenerate
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if ! rth_state_tx --arg ip "$ip" --arg fc "$fc" --arg key "$key" \
+     '.ip_tls = {ip:$ip, fullchain:$fc, key:$key, self_signed:true}'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "zakhire IP TLS dar state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "faalsazi IP TLS shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "WSS-e self-signed baraye IP=$ip faal shod; domain/cert-e asli dast-nakhorde mand."
   echo "public_cert: $fc"
   echo "private_key: $key (faghat rooye Iran; be node copy nakon)"
@@ -2052,8 +2349,23 @@ cmd_ip_cert_off(){
       wss|wssmux) die "backhaul-e direct-IP ba '${_btr}' az hamin gvahi estefade mikonad. aval an ra be 'wsmux' bebar ya khamoosh kon: ratholectl backhaul on <port> wsmux <profile> direct_ip" ;;
     esac
   fi
-  rth_state_tx 'del(.ip_tls)' || die "hazf IP TLS az state shekast khord."
-  regenerate
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if ! rth_state_tx 'del(.ip_tls)'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "hazf IP TLS az state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "khamoosh kardan IP TLS shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "vhost-e IP TLS khamoosh shod; file-e cert/private-key pak nashod."
 }
 
@@ -2074,12 +2386,25 @@ cmd_cert(){
     local fc="/etc/letsencrypt/live/${domain}/fullchain.pem"
     local key="/etc/letsencrypt/live/${domain}/privkey.pem"
     log "gvahi grfth shod: /etc/letsencrypt/live/${domain}/"
-    # tanzim damnh va gvahi be onvan damnh asli + baztolid nginx/server.toml
-    state_set '.domain' "$domain" str
-    state_set '.cert_fullchain' "$fc" str
-    state_set '.cert_key' "$key" str
+    local pre_st_bak=""
+    if [ -f "$STATE" ]; then
+      pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+      if ! cp -a "$STATE" "$pre_st_bak"; then
+        rm -f "$pre_st_bak" 2>/dev/null || true
+        die "copy snapshot-e state shekast khord."
+      fi
+    fi
+    if ! rth_state_tx --arg d "$domain" --arg fc "$fc" --arg key "$key" \
+       '.domain = $d | .cert_fullchain = $fc | .cert_key = $key'; then
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+      die "sabt-e cert dar state shekast khord."
+    fi
     [ "$was_active" -eq 1 ] && systemctl start nginx || true
-    regenerate
+    if ! regenerate "$pre_st_bak"; then
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+      die "taghir-e damnh shekast khord va rollback shod."
+    fi
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
     log "damnh asli be '$domain' taghir kard va nginx baztolid shod."
   else
     [ "$was_active" -eq 1 ] && systemctl start nginx || true
@@ -2092,15 +2417,23 @@ cmd_cert(){
 cmd_recover(){
   need_root; need_bin jq; ensure_state
   warn "recover: hazf hameye domainhaye ezafi va baztolid config tak-damnh (halat salem ghabli)."
-  rth_state_tx 'del(.extra_domains)' || die "hazf extra_domains az state shekast khord."
-  regenerate
-  local out; out="$(jq -r '.nginx_conf // empty' "$STATE" 2>/dev/null)"; [ -n "$out" ] || out="$NGINX_CONF"
-  if command -v nginx >/dev/null 2>&1 && ! nginx -t >/dev/null 2>&1; then
-    if [ -f "$out.rathole-good.bak" ]; then
-      cp -a "$out.rathole-good.bak" "$out"; nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
-      warn "config known-good bazgardande shod."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
     fi
   fi
+  if ! rth_state_tx 'del(.extra_domains)'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "hazf extra_domains az state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "recover shekast khord va state/config rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "recover tamam shod. barresi: ratholectl doctor"
 }
 
@@ -2161,11 +2494,25 @@ cmd_domain_add(){
       die "gvahi peyda nashod: $fc / $key (aval ba --certbot begir ya masir bede)."
     fi
   fi
-  rth_state_tx --arg d "$domain" --arg fc "$fc" --arg k "$key" \
-     '.extra_domains = ((.extra_domains // []) | map(select(.domain!=$d)) + [{domain:$d,fullchain:$fc,key:$k}])' \
-     || die "ezafe kardan-e extra_domain be state shekast khord."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if ! rth_state_tx --arg d "$domain" --arg fc "$fc" --arg k "$key" \
+     '.extra_domains = ((.extra_domains // []) | map(select(.domain!=$d)) + [{domain:$d,fullchain:$fc,key:$k}])'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "ezafe kardan-e extra_domain be state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "ezafe kardan-e extra_domain shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "damnh '$domain' ezafe shod (gvahi: $fc)."
-  regenerate
 }
 
 cmd_domain_primary(){
@@ -2210,28 +2557,57 @@ cmd_domain_primary(){
   [ -n "$fc" ]  || fc="/etc/letsencrypt/live/${newd}/fullchain.pem"
   [ -n "$key" ] || key="/etc/letsencrypt/live/${newd}/privkey.pem"
   { [ -f "$fc" ] && [ -f "$key" ]; } || die "gvahi damnh jadid peyda nashod: $fc / $key (aval --certbot ya masir bede)."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
   # taghir atomic: damnh ghabli -> extra (agar gvahi darad), damnh jadid -> asli, va az extra hazf
-  rth_state_tx --arg nd "$newd" --arg nfc "$fc" --arg nk "$key" \
+  if ! rth_state_tx --arg nd "$newd" --arg nfc "$fc" --arg nk "$key" \
      --arg od "$cur" --arg ofc "$ofc" --arg okey "$okey" '
      (.extra_domains // []) as $ex
      | ($ex | map(select(.domain != $nd and .domain != $od))) as $rest
      | (if ($ofc|length) > 0 then $rest + [{domain:$od, fullchain:$ofc, key:$okey}] else $rest end) as $withold
      | .extra_domains = $withold
      | .domain = $nd | .cert_fullchain = $nfc | .cert_key = $nk
-     ' || die "taghir-e primary domain dar state shekast khord."
+     '; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "taghir-e primary domain dar state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "taghir-e primary domain shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "damnh asli be '$newd' taghir krd. damnh ghabli '$cur' be extra montaghel shod va hamchenan faal ast."
   warn "node-haye ghadimi ba $cur:443 bedoon ghati kar mikonand; damnh jadid $newd ham az hamin lahze faal ast."
-  regenerate
 }
 
 cmd_domain_rm(){
   local domain="${1:-}"
   [ -n "$domain" ] || die "estefade: ratholectl domain rm <domain>"
   jq -e --arg d "$domain" '(.extra_domains // [])[]|select(.domain==$d)' "$STATE" >/dev/null 2>&1 || die "damnh ezafi '$domain' peyda nashod."
-  rth_state_tx --arg d "$domain" '.extra_domains = ((.extra_domains // []) | map(select(.domain!=$d)))' \
-     || die "hazf-e extra_domain az state shekast khord."
+  local pre_st_bak=""
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if ! rth_state_tx --arg d "$domain" '.extra_domains = ((.extra_domains // []) | map(select(.domain!=$d)))'; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "hazf-e extra_domain az state shekast khord."
+  fi
+  if ! regenerate "$pre_st_bak"; then
+    [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+    die "hazf-e extra_domain shekast khord va rollback shod."
+  fi
+  [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
   log "damnh '$domain' hazf shod."
-  regenerate
 }
 
 cmd_domain_ls(){
@@ -2292,21 +2668,81 @@ cmd_kcp_on(){
   key="$(jq -r '.kcp.key // empty' "$STATE" 2>/dev/null)"
   [ -n "$key" ] || key="$(gen_token)"
   install_kcptun server
+
+  # Pre-snapshot state & unit for atomic transaction
+  local pre_st_bak="" pre_unit_bak="" had_unit=0
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if [ -f "$KCP_SRV_UNIT" ]; then
+    had_unit=1
+    pre_unit_bak="$(rth_mktemp)" || { [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak"; die "sakht snapshot-e unit shekast khord."; }
+    if ! cp -a "$KCP_SRV_UNIT" "$pre_unit_bak"; then
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak"
+      rm -f "$pre_unit_bak" 2>/dev/null || true
+      die "copy snapshot-e unit shekast khord."
+    fi
+  fi
+
+  _rollback_kcp_on(){
+    local rb_failed=0
+    if [ -n "$pre_st_bak" ] && [ -f "$pre_st_bak" ]; then
+      cp -a "$pre_st_bak" "$STATE" || rb_failed=1
+    fi
+    if [ "$had_unit" -eq 1 ]; then
+      if [ -n "$pre_unit_bak" ] && [ -f "$pre_unit_bak" ]; then
+        cp -a "$pre_unit_bak" "$KCP_SRV_UNIT" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+    else
+      rm -f "$KCP_SRV_UNIT" 2>/dev/null || true
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "$pre_st_bak" "$pre_unit_bak" 2>/dev/null || true
+    if [ "$rb_failed" -eq 1 ]; then
+      err "HOSHDAR: rollback-e kcp ba khata movajeh shod."
+      return 1
+    fi
+    log "kcp rollback shod (state va unit bazgardande shodand)."
+    return 0
+  }
+
   # zkhirh dar state
-  rth_state_tx --argjson p "$port" --arg k "$key" --argjson c "$ctrl" --arg prof "$profile" \
+  if ! rth_state_tx --argjson p "$port" --arg k "$key" --argjson c "$ctrl" --arg prof "$profile" \
      --argjson ds "$ds" --argjson ps "$ps" --arg mode "$mode" --argjson sw "$sw" --argjson rw "$rw" \
      '.kcp = {enabled:true, port:$p, key:$k, target:("127.0.0.1:"+($c|tostring)),
-              profile:$prof, mtu:1350, sndwnd:$sw, rcvwnd:$rw, datashard:$ds, parityshard:$ps, mode:$mode, crypt:"aes-128"}' \
-     || die "sabt-e kcp dar state shekast khord."
-  gen_kcp_server_unit || die "sakht-e unit-e kcp-server shekast khord."
-  systemctl daemon-reload
-  systemctl enable rathole-kcp-server >/dev/null 2>&1
-  systemctl restart rathole-kcp-server 2>/dev/null
-  if systemctl is-active --quiet rathole-kcp-server; then
-    log "kcp-server rooye UDP :$port faal shod → 127.0.0.1:$ctrl (profile: $profile)."
-  else
-    err "rathole-kcp-server bala niamd; log: journalctl -u rathole-kcp-server -n 30"
+              profile:$prof, mtu:1350, sndwnd:$sw, rcvwnd:$rw, datashard:$ds, parityshard:$ps, mode:$mode, crypt:"aes-128"}'; then
+    _rollback_kcp_on
+    die "sabt-e kcp dar state shekast khord."
   fi
+
+  if ! gen_kcp_server_unit; then
+    _rollback_kcp_on
+    die "sakht-e unit-e kcp-server shekast khord."
+  fi
+
+  if ! systemctl daemon-reload 2>/dev/null; then
+    _rollback_kcp_on
+    die "daemon-reload baraye kcp-server shekast khord."
+  fi
+
+  if ! systemctl enable rathole-kcp-server >/dev/null 2>&1; then
+    _rollback_kcp_on
+    die "enable kardan-e rathole-kcp-server shekast khord."
+  fi
+
+  if ! systemctl restart rathole-kcp-server 2>/dev/null || ! systemctl is-active --quiet rathole-kcp-server; then
+    _rollback_kcp_on
+    die "rathole-kcp-server bala niamd ya restart shekast khord; amaliat rollback shod."
+  fi
+
+  rm -f "$pre_st_bak" "$pre_unit_bak" 2>/dev/null || true
+  log "kcp-server rooye UDP :$port faal shod → 127.0.0.1:$ctrl (profile: $profile)."
   if [ "$port" = 443 ]; then
     log "estetar: UDP/443 baraye DPI shbih QUIC/HTTP3 didh mishavad (tdakhli ba nginx rooye TCP/443 nadarad)."
   fi
@@ -2353,9 +2789,67 @@ UNIT
 }
 
 cmd_kcp_off(){
-  systemctl disable --now rathole-kcp-server 2>/dev/null || true
-  rm -f "$KCP_SRV_UNIT"; systemctl daemon-reload 2>/dev/null || true
-  rth_state_tx '(.kcp.enabled) = false' || die "khamoosh kardan-e kcp dar state shekast khord."
+  # Pre-snapshot state & unit for atomic rollback
+  local pre_st_bak="" pre_unit_bak="" had_unit=0
+  if [ -f "$STATE" ]; then
+    pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+    if ! cp -a "$STATE" "$pre_st_bak"; then
+      rm -f "$pre_st_bak" 2>/dev/null || true
+      die "copy snapshot-e state shekast khord."
+    fi
+  fi
+  if [ -f "$KCP_SRV_UNIT" ]; then
+    had_unit=1
+    pre_unit_bak="$(rth_mktemp)" || { [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak"; die "sakht snapshot-e unit shekast khord."; }
+    if ! cp -a "$KCP_SRV_UNIT" "$pre_unit_bak"; then
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak"
+      rm -f "$pre_unit_bak" 2>/dev/null || true
+      die "copy snapshot-e unit shekast khord."
+    fi
+  fi
+
+  _rollback_kcp_off(){
+    local rb_failed=0
+    if [ -n "$pre_st_bak" ] && [ -f "$pre_st_bak" ]; then
+      cp -a "$pre_st_bak" "$STATE" || rb_failed=1
+    fi
+    if [ "$had_unit" -eq 1 ]; then
+      if [ -n "$pre_unit_bak" ] && [ -f "$pre_unit_bak" ]; then
+        cp -a "$pre_unit_bak" "$KCP_SRV_UNIT" || rb_failed=1
+      else
+        rb_failed=1
+      fi
+      systemctl daemon-reload 2>/dev/null || true
+      systemctl enable rathole-kcp-server 2>/dev/null || true
+      systemctl restart rathole-kcp-server 2>/dev/null || true
+    fi
+    rm -f "$pre_st_bak" "$pre_unit_bak" 2>/dev/null || true
+    if [ "$rb_failed" -eq 1 ]; then
+      err "HOSHDAR: rollback-e kcp off ba khata movajeh shod."
+      return 1
+    fi
+    log "kcp off rollback shod (state va unit bazgardande shodand)."
+    return 0
+  }
+
+  if ! systemctl disable --now rathole-kcp-server 2>/dev/null; then
+    _rollback_kcp_off
+    die "disable kardan-e rathole-kcp-server shekast khord."
+  fi
+  if systemctl is-active --quiet rathole-kcp-server; then
+    _rollback_kcp_off
+    die "rathole-kcp-server pas az disable --now hamchenan active ast؛ amaliat rollback shod."
+  fi
+  rm -f "$KCP_SRV_UNIT"
+  if ! systemctl daemon-reload 2>/dev/null; then
+    _rollback_kcp_off
+    die "daemon-reload pas az hazf unit shekast khord."
+  fi
+  if ! rth_state_tx '(.kcp.enabled) = false'; then
+    _rollback_kcp_off
+    die "khamoosh kardan-e kcp dar state shekast khord."
+  fi
+  rm -f "$pre_st_bak" "$pre_unit_bak" 2>/dev/null || true
   log "kcp-server khamoosh shod. tunnelha az haman masir websocket/443 kar mikonand."
 }
 
@@ -2531,18 +3025,45 @@ cmd_hub(){
       if ! systemctl is-active --quiet ratholehub; then
         die "service ratholehub bala nayamad! bebin: journalctl -u ratholehub -n 30 --no-pager"
       fi
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
       state_set '.hub_port' "$port" num
       log "panel psht nginx faal shod: https://$(s_get '.domain')/$(hub_path_seg)/  →  127.0.0.1:$port"
       warn "panel hala amvmi ast; ramz ghvi rooye hab bgzar."
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "faalsazi-ye panel hub shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     off)
-      rth_state_tx 'del(.hub_port)' || die "hazf-e hub_port az state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx 'del(.hub_port)'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf-e hub_port az state shekast khord."
+      fi
       log "panel az nginx hazf shod (location /$(hub_path_seg)/ brdashth shod)."
       if systemctl is-active --quiet ratholehub 2>/dev/null; then
         warn "service ratholehub hamchenan roshan ast (127.0.0.1; dstrsi fght ba SSH-forward). khamoosh: systemctl stop ratholehub"
       fi
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e panel hub shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     status)
       local hp lp; hp="$(jq -r '.hub_port // empty' "$STATE" 2>/dev/null)"
@@ -2574,17 +3095,44 @@ cmd_plain(){
       port="${port:-8880}"
       echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
       [ "$port" = "443" ] && die "port 443 baraye halat TLS rezerv ast; port-e digari (masalan 8880) bede."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
       state_set '.plain_port' "$port" num
       log "halat plain (bedoon TLS) faal shod: listener HTTP rooye port $port → kontrol rathole."
       warn "firewall: port TCP $port ra baz kon (masalan: ufw allow $port/tcp)."
       command -v ufw >/dev/null 2>&1 && ufw allow "$port/tcp" >/dev/null 2>&1 || true
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "faalsazi-ye halat plain shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       print_plain_connect
       ;;
     off)
-      rth_state_tx 'del(.plain_port)' || die "hazf plain_port az state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx 'del(.plain_port)'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf plain_port az state shekast khord."
+      fi
       log "halat plain khamoosh shod (listener HTTP hazf shod). node-ha bayad be halat TLS bargardand."
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e halat plain shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     status)
       local pp; pp="$(jq -r '.plain_port // empty' "$STATE" 2>/dev/null)"
@@ -2635,19 +3183,46 @@ cmd_direct(){
       local internal; internal="$(jq -r '.internal_port // 8443' "$STATE" 2>/dev/null)"
       [ "$port" = "$internal" ] && die "port $port ba internal_port-e game/SNI tadakhol darad; port-e digari bede."
       echo "$header" | grep -qE '^[A-Za-z0-9-]{1,40}$' || die "header faghat hrvf/adad/khttirh (-) mjaz ast."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
       state_set '.direct_port' "$port" num
       state_set '.direct_header' "$header"
       log "halat direct-IP (masiryabi ba header, bedoon TLS) faal shod: listener HTTP rooye port $port, header '$header'."
       warn "firewall: port TCP $port ra baz kon (masalan: ufw allow $port/tcp)."
       warn "in listener bedoon TLS/auth ast; ehrazhoviat dar laye-ye proxy-e daroon-e tunnel ast."
       command -v ufw >/dev/null 2>&1 && ufw allow "$port/tcp" >/dev/null 2>&1 || true
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "faalsazi-ye halat direct-IP shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       print_direct_connect
       ;;
     off)
-      rth_state_tx 'del(.direct_port, .direct_header)' || die "hazf direct_port az state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx 'del(.direct_port, .direct_header)'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf direct_port az state shekast khord."
+      fi
       log "halat direct-IP khamoosh shod (listener HTTP hazf shod). port-e firewall ra mitavani bebandi."
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e halat direct-IP shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     status)
       local dp dh; dp="$(jq -r '.direct_port // empty' "$STATE" 2>/dev/null)"; dh="$(jq -r '.direct_header // empty' "$STATE" 2>/dev/null)"
@@ -2729,28 +3304,53 @@ cmd_noise(){
       local internal; internal="$(jq -r '.internal_port // 8443' "$STATE" 2>/dev/null)"
       [ "$port" = "$internal" ] && die "port $port ba internal_port-e game/SNI tadakhol darad; port-e digari bede."
       noise_genkey
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
       state_set '.noise_port' "$port" num
       state_set '.noise_pattern' "${NOISE_PATTERN_DEFAULT}"
       ensure_noise_unit
       gen_noise_server_toml
-      systemctl enable "$NOISE_SVC" >/dev/null 2>&1 || true
       warn "firewall: port TCP $port ra baz kon (masalan: ufw allow $port/tcp)."
       command -v ufw >/dev/null 2>&1 && ufw allow "$port/tcp" >/dev/null 2>&1 || true
       log "halat noise (ramznegari-shode) faal shod: rathole-noise rooye port-e omomi $port."
-      regenerate
-      systemctl restart "$NOISE_SVC" 2>/dev/null && log "$NOISE_SVC start shod." || err "start-e $NOISE_SVC nashod; log: journalctl -u $NOISE_SVC -n 30"
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "faalsazi-ye halat noise shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       print_noise_connect "${1:-}"
       ;;
     off)
       # transport-e node-haye NOISE ra hazf kon (nabvdan = ws), service ra khamoosh kon, state-key-haye noise ra hazf kon.
       # faghat noise — vagarna node-haye backhaul ham bi-seda be ws bar migardand.
-      rth_state_tx '(.nodes[] | select(.transport == "noise")) |= del(.transport)
-          | del(.noise_port,.noise_pattern,.noise_privkey,.noise_pubkey)' || die "khamoosh kardan-e noise dar state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx '(.nodes[] | select(.transport == "noise")) |= del(.transport)
+          | del(.noise_port,.noise_pattern,.noise_privkey,.noise_pubkey)'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e noise dar state shekast khord."
+      fi
       systemctl disable --now "$NOISE_SVC" 2>/dev/null || true
       rm -f "$NOISE_UNIT"; systemctl daemon-reload 2>/dev/null || true
       rm -f "$NOISE_TOML"
       log "halat noise khamoosh shod (rathole-noise hazf shod). node-haye noise be ws/443 bargardande shodand."
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e halat noise shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     node)
       local name="${1:-}" act="${2:-}"
@@ -2763,15 +3363,45 @@ cmd_noise(){
           # transport-e har node YEKI ast — node-e backhaul ra bi-seda switch nakon.
           local cur; cur="$(jq -r --arg n "$name" '.nodes[] | select(.name==$n) | .transport // "ws"' "$STATE" 2>/dev/null)"
           [ "$cur" = backhaul ] && die "node '$name' rooye core-e backhaul ast; aval 'ratholectl backhaul node $name off' ra bezan."
-          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "noise"' || die "tagheer-e transport-e node be noise shekast khord."
+          local pre_st_bak=""
+          if [ -f "$STATE" ]; then
+            pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+            if ! cp -a "$STATE" "$pre_st_bak"; then
+              rm -f "$pre_st_bak" 2>/dev/null || true
+              die "copy snapshot-e state shekast khord."
+            fi
+          fi
+          if ! rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "noise"'; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "tagheer-e transport-e node be noise shekast khord."
+          fi
           log "node '$name' be masir-e noise montaghel shod."
-          regenerate
+          if ! regenerate "$pre_st_bak"; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "tagheer-e node be noise shekast khord va rollback shod."
+          fi
+          [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
           print_noise_connect "$name"
           ;;
         off)
-          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="noise")) |= del(.transport)' || die "bargasht-e transport-e node be ws shekast khord."
+          local pre_st_bak=""
+          if [ -f "$STATE" ]; then
+            pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+            if ! cp -a "$STATE" "$pre_st_bak"; then
+              rm -f "$pre_st_bak" 2>/dev/null || true
+              die "copy snapshot-e state shekast khord."
+            fi
+          fi
+          if ! rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="noise")) |= del(.transport)'; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "bargasht-e transport-e node be ws shekast khord."
+          fi
           log "node '$name' be masir-e ws/443 bargasht."
-          regenerate
+          if ! regenerate "$pre_st_bak"; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "bargasht-e node be ws shekast khord va rollback shod."
+          fi
+          [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
           ;;
         *) die "estefade: ratholectl noise node <name> <on|off>" ;;
       esac
@@ -2873,6 +3503,14 @@ cmd_backhaul(){
       # token-e moshterak: agar az ghabl dar state ast hefz, vagarna besaz (mesl control_path)
       local token; token="$(jq -r '.backhaul_token // empty' "$STATE" 2>/dev/null)"
       if [ -z "$token" ] || [ "$token" = null ]; then token="$(openssl rand -hex 20)"; fi
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
       state_set '.backhaul_port' "$port" num
       state_set '.backhaul_transport' "$transport" str
       state_set '.backhaul_token' "$token" str
@@ -2880,7 +3518,6 @@ cmd_backhaul(){
       state_set '.backhaul_exposure' "$exposure" str
       ensure_backhaul_unit
       gen_backhaul_server_toml
-      systemctl enable "$BH_SVC" >/dev/null 2>&1 || true
       if [ "$exposure" = "direct_ip" ]; then
         case "$transport" in
           wss|wssmux)
@@ -2893,19 +3530,37 @@ cmd_backhaul(){
       else
         log "backhaul core faal shod: backhaul-server ru-ye 127.0.0.1:${port} (transport=${transport}, profile=${profile}) — az nginx/443 obur miknd (/channel,/tunnel)."
       fi
-      regenerate
-      systemctl restart "$BH_SVC" 2>/dev/null && log "$BH_SVC start shod." || err "start-e $BH_SVC nashod; log: journalctl -u $BH_SVC -n 30"
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "faalsazi-ye core backhaul shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       print_backhaul_connect
       ;;
     off)
       # node-haye backhaul be transport-e pishfarz (ws az nginx/443) barmigardand — .transport hazf mishavad.
-      rth_state_tx '(.nodes[] | select(.transport == "backhaul")) |= del(.transport)
-          | del(.backhaul_port,.backhaul_transport,.backhaul_token,.backhaul_profile,.backhaul_exposure)' || die "khamoosh kardan-e backhaul dar state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx '(.nodes[] | select(.transport == "backhaul")) |= del(.transport)
+          | del(.backhaul_port,.backhaul_transport,.backhaul_token,.backhaul_profile,.backhaul_exposure)'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e backhaul dar state shekast khord."
+      fi
       systemctl disable --now "$BH_SVC" 2>/dev/null || true
       rm -f "$BH_UNIT"; systemctl daemon-reload 2>/dev/null || true
       rm -f "$BH_TOML"
       log "backhaul core khamoosh shod (rathole-backhaul-server hazf shod)."
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "khamoosh kardan-e core backhaul shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     node)
       local name="${1:-}" act="${2:-}"
@@ -2935,15 +3590,45 @@ cmd_backhaul(){
             err "do mashin ba yek token → har DO tunnel ghat mishavad."
             die "baraye in node az rathole estefade kon (ws/kcp/plain/noise)، ya aval '${clash}' ra backhaul off kon."
           fi
-          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "backhaul"' || die "tagheer-e transport-e node be backhaul shekast khord."
+          local pre_st_bak=""
+          if [ -f "$STATE" ]; then
+            pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+            if ! cp -a "$STATE" "$pre_st_bak"; then
+              rm -f "$pre_st_bak" 2>/dev/null || true
+              die "copy snapshot-e state shekast khord."
+            fi
+          fi
+          if ! rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "backhaul"'; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "tagheer-e transport-e node be backhaul shekast khord."
+          fi
           log "node '$name' be backhaul switch shod (az rathole-server kharej shod)."
-          regenerate
+          if ! regenerate "$pre_st_bak"; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "switch node be backhaul shekast khord va rollback shod."
+          fi
+          [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
           print_backhaul_connect
           ;;
         off)
-          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="backhaul")) |= del(.transport)' || die "bargasht-e transport-e node be ws shekast khord."
+          local pre_st_bak=""
+          if [ -f "$STATE" ]; then
+            pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+            if ! cp -a "$STATE" "$pre_st_bak"; then
+              rm -f "$pre_st_bak" 2>/dev/null || true
+              die "copy snapshot-e state shekast khord."
+            fi
+          fi
+          if ! rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="backhaul")) |= del(.transport)'; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "bargasht-e transport-e node be ws shekast khord."
+          fi
           log "node '$name' be transport-e pishfarz (ws az nginx/443) bargasht."
-          regenerate
+          if ! regenerate "$pre_st_bak"; then
+            [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+            die "bargasht-e node be ws shekast khord va rollback shod."
+          fi
+          [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
           ;;
         *) die "estefade: ratholectl backhaul node <name> <on|off>" ;;
       esac
@@ -2998,10 +3683,25 @@ cmd_proxy(){
         && die "esm '$name' motealegh be yek node ast (har do dar map-e /<name> mineshinand)."
       jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
         && die "reverse-proxy '$name' az ghabl vojood darad."
-      rth_state_tx --arg n "$name" --arg u "$up" \
-         '.proxies = ((.proxies // []) + [{name:$n, upstream:$u}])' || die "afzoodan-e reverse-proxy be state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx --arg n "$name" --arg u "$up" \
+         '.proxies = ((.proxies // []) + [{name:$n, upstream:$u}])'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "afzoodan-e reverse-proxy be state shekast khord."
+      fi
       log "reverse-proxy ezafe shod: /${name}/ → ${up}"
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "afzoodan-e reverse-proxy shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       local domain; domain="$(s_get '.domain')"
       echo "masir-e karbar: https://${domain:-<DOMAIN>}/${name}/"
       ;;
@@ -3010,9 +3710,24 @@ cmd_proxy(){
       [ -n "$name" ] || die "estefade: ratholectl proxy rm <name>"
       jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
         || die "reverse-proxy '$name' peyda nashod."
-      rth_state_tx --arg n "$name" '.proxies = ((.proxies // []) | map(select(.name != $n)))' || die "hazf-e reverse-proxy az state shekast khord."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
+      if ! rth_state_tx --arg n "$name" '.proxies = ((.proxies // []) | map(select(.name != $n)))'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf-e reverse-proxy az state shekast khord."
+      fi
       log "reverse-proxy hazf shod: $name"
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf-e reverse-proxy shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       ;;
     ls)
       local cnt; cnt="$(jq -r '(.proxies // []) | length' "$STATE" 2>/dev/null)"
@@ -3383,10 +4098,22 @@ cmd_control_path(){
       local old new
       old="$(jq -r '.control_path // empty' "$STATE" 2>/dev/null)"
       new="/_rh/$(openssl rand -hex 16)"
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
+        if ! cp -a "$STATE" "$pre_st_bak"; then
+          rm -f "$pre_st_bak" 2>/dev/null || true
+          die "copy snapshot-e state shekast khord."
+        fi
+      fi
       # masir-e ghabli ra baraye yek dore-ye gozar zakhire mikonim ta node-haye dar-hal-update ghat nakonand
       state_set '.control_path_previous' "${old:-}" str
       state_set '.control_path' "$new" str
-      regenerate
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "rotate control-path shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
       log "control-path rotate shod: $old → $new"
       warn "hame-ye node-haye vasl-ra ba dastoor-e zir berooz kon:"
       warn "  ratholenode set SERVER <panel-domain>:443  # ya az hub update bezan"

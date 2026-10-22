@@ -45,6 +45,8 @@ die(){ err "$*"; exit 1; }
 # pas karbar amalan hich rahi baraye pin kardan-e noskhe nadasht. flag az har do masir amn ast.
 # ARGS-e baghimande dast-nakhorde be bootstrap miravad (--panel/--node/--update/... hamchenan kar mikonad).
 ARGS=()
+TRUSTED_SHA256=""
+TRUSTED_SHA256SUMS_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --release|--version|-r)
@@ -53,6 +55,14 @@ while [ $# -gt 0 ]; do
     --release=*|--version=*) REL="${1#*=}"; shift ;;
     --beta)   REL="beta"; shift ;;
     --stable) REL="latest"; shift ;;
+    --sha256)
+      [ $# -ge 2 ] || die "$1 be yek meghdar niaz darad."
+      TRUSTED_SHA256="$2"; shift 2 ;;
+    --sha256=*) TRUSTED_SHA256="${1#*=}"; shift ;;
+    --sha256sums-file)
+      [ $# -ge 2 ] || die "$1 be yek masir niaz darad."
+      TRUSTED_SHA256SUMS_FILE="$2"; shift 2 ;;
+    --sha256sums-file=*) TRUSTED_SHA256SUMS_FILE="${1#*=}"; shift ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
@@ -195,11 +205,62 @@ main(){
   fi
   log "baste daryaft shod: $(basename "$bundle")  ($(du -h "$bundle" 2>/dev/null | cut -f1))"
 
-  # 2.5) etebarsanji ba SHA256SUMS agar dar release bashad
-  if fetch "$DL/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
-    log "etebarsanji cryptographic (SHA256SUMS)..."
-    (cd "$tmp" && sha256sum -c --ignore-missing SHA256SUMS >/dev/null 2>&1) || die "Checksum verification shekast khord! File-haye daryafti dastkari shode-and."
-    log "Checksums taeed shodand (SHA256 OK)."
+  # 2.5) Etebarsanji-ye ejbari-ye checksum (fail-closed pish az har taghir-e system)
+  if [ -n "$TRUSTED_SHA256SUMS_FILE" ]; then
+    [ -f "$TRUSTED_SHA256SUMS_FILE" ] || die "File-e checksum-e trusted peyda nashod: $TRUSTED_SHA256SUMS_FILE"
+    cp -f "$TRUSTED_SHA256SUMS_FILE" "$tmp/SHA256SUMS"
+    log "Etebarsanji ba file-e checksum-e motabar-e mahalli (trusted): $TRUSTED_SHA256SUMS_FILE"
+  else
+    log "Daryaft-e SHA256SUMS az release: $DL/SHA256SUMS ..."
+    if ! fetch "$DL/SHA256SUMS" "$tmp/SHA256SUMS"; then
+      die "Daryaft-e SHA256SUMS az release shekast khord ($DL/SHA256SUMS). Etebarsanji-ye checksum baraye nasb EJBARI ast (fail-closed). Baraye nasb-e offline az --sha256sums-file ya --sha256 estefade konid."
+    fi
+    warn "HOSHDAR: Checksum-e ham-manba (same-origin SHA256SUMS az GitHub Release) faghat salamat-e file dar barabar-e download-e naghes ya kharab ra barresi mikonad va emzaye esalat (authenticity/PGP signature) nist."
+  fi
+
+  [ -s "$tmp/SHA256SUMS" ] || die "File-e SHA256SUMS khali ast ya daryaft nashod."
+
+  local bname; bname="$(basename "$bundle")"
+  local req_files=("bootstrap.sh" "$bname")
+  local rf
+  for rf in "${req_files[@]}"; do
+    if ! grep -qE "[[:space:]](\./)?${rf}$" "$tmp/SHA256SUMS"; then
+      die "File-e elzami '${rf}' dar SHA256SUMS vojood nadarad! Etebarsanji shekast khord (fail-closed)."
+    fi
+    local expected_sum actual_sum
+    expected_sum="$(grep -E "[[:space:]](\./)?${rf}$" "$tmp/SHA256SUMS" | awk '{print $1}' | head -n1)"
+    [ -n "$expected_sum" ] || die "Checksum-e file '${rf}' dar manifest peyda nashod."
+
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual_sum="$(sha256sum "$tmp/$rf" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual_sum="$(shasum -a 256 "$tmp/$rf" | awk '{print $1}')"
+    elif command -v openssl >/dev/null 2>&1; then
+      actual_sum="$(openssl dgst -sha256 "$tmp/$rf" | awk '{print $NF}')"
+    else
+      die "Abzar-e mohasebe-ye sha256 peyda nashod (sha256sum/shasum/openssl)."
+    fi
+
+    if [ "$actual_sum" != "$expected_sum" ]; then
+      die "Checksum mismatch baraye '${rf}'! Entezari: $expected_sum , Mohasebe-shode: $actual_sum"
+    fi
+    log "Checksum-e ${rf} ba movafaghiat taeed shod: $actual_sum"
+  done
+
+  local bundle_sha
+  if command -v sha256sum >/dev/null 2>&1; then
+    bundle_sha="$(sha256sum "$bundle" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    bundle_sha="$(shasum -a 256 "$bundle" | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    bundle_sha="$(openssl dgst -sha256 "$bundle" | awk '{print $NF}')"
+  fi
+
+  if [ -n "$TRUSTED_SHA256" ]; then
+    if [ "$bundle_sha" != "$TRUSTED_SHA256" ]; then
+      die "Bundle ba trusted --sha256 dade-shode motabeghat nadarad! Entezari: $TRUSTED_SHA256 , Mohasebe-shode: $bundle_sha"
+    fi
+    log "Bundle ba trusted --sha256 taeed shod: $bundle_sha"
   fi
 
   # 3) tahvil be bootstrap.sh (hameye argvman-haye passed be bootstrap miravand)
@@ -207,7 +268,7 @@ main(){
   # nabayad dobare be `latest` bargardad (vagarna noskhe-ye pin-shode bi-seda avaz mishavad).
   log "ejra-ye bootstrap..."
   export RATHOLE_GH="$GH" RATHOLE_RELEASE="$REL"
-  bash "$tmp/bootstrap.sh" --local "$bundle" "$@"
+  bash "$tmp/bootstrap.sh" --local "$bundle" --sha256 "$bundle_sha" --sha256sums-file "$tmp/SHA256SUMS" "$@"
   local rc=$?
   exit "$rc"
 }
