@@ -85,12 +85,21 @@ install_prereqs(){
   local pkgs="curl unzip tar ca-certificates"
   log "amade-sazi mohit va nasb pish-niazha ($pkgs)..."
   if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y $pkgs
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y $pkgs
-  elif command -v yum >/dev/null 2>&1; then yum install -y $pkgs
-  elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm curl unzip tar ca-certificates
-  elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl unzip tar ca-certificates bash
+    export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y $pkgs || warn "apt-get install ba khata movajeh shod."
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y $pkgs || warn "dnf install ba khata movajeh shod."
+  elif command -v yum >/dev/null 2>&1; then yum install -y $pkgs || warn "yum install ba khata movajeh shod."
+  elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm curl unzip tar ca-certificates || warn "pacman install ba khata movajeh shod."
+  elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl unzip tar ca-certificates bash || warn "apk install ba khata movajeh shod."
   else warn "pkijmnijr shnakhth nshd; motmaen shv curl/unzip/tar nasb-and."; fi
+
+  local missing=()
+  command -v tar >/dev/null 2>&1 || missing+=("tar")
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    missing+=("curl/wget")
+  fi
+  if [ "${#missing[@]}" -gt 0 ]; then
+    die "abzarhaye lazem nasb nashodand: ${missing[*]}. lotfan anha ra dasti nasb kon."
+  fi
 }
 
 # ---------- peyda kardan baste-ye mahalli ----------
@@ -163,43 +172,76 @@ download(){
   else return 1; fi
 }
 
+validate_zip_archive(){
+  local archive="$1"
+  [ -f "$archive" ] || return 1
+  command -v unzip >/dev/null 2>&1 || return 1
+  local entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      /*|[A-Za-z]:*)
+        err "validate_zip_archive: masir-e motlagh dar zip mojaz nist: $entry"
+        return 1
+        ;;
+    esac
+    if echo "$entry" | grep -qE '(^|/|\\)\.\.(/|\\|$)'; then
+      err "validate_zip_archive: path traversal (..) dar zip mojaz nist: $entry"
+      return 1
+    fi
+  done < <(unzip -Z1 "$archive" 2>/dev/null || unzip -l "$archive" 2>/dev/null | awk 'NR>3 {for (i=4; i<=NF; i++) printf "%s%s", $i, (i==NF?ORS:OFS)}')
+  return 0
+}
+
+validate_tar_archive(){
+  local archive="$1"
+  [ -f "$archive" ] || return 1
+  local entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      /*|[A-Za-z]:*)
+        err "validate_tar_archive: masir-e motlagh dar tar mojaz nist: $entry"
+        return 1
+        ;;
+    esac
+    if echo "$entry" | grep -qE '(^|/|\\)\.\.(/|\\|$)'; then
+      err "validate_tar_archive: path traversal (..) dar tar mojaz nist: $entry"
+      return 1
+    fi
+  done < <(tar -tf "$archive" 2>/dev/null)
+  return 0
+}
+
 # ---------- baz kardan ----------
 extract(){
-  local file="$1" dest="$2"; mkdir -p "$dest"
+  local file="$1" dest="$2"
+  mkdir -p "$dest"
   chmod 700 "$dest" 2>/dev/null || true
   case "$file" in
     *.zip)
       command -v unzip >/dev/null 2>&1 || die "unzip nasb nist."
-      if unzip -l "$file" 2>/dev/null | awk '{print $4}' | grep -E '(^/|\.\.)'; then
-        die "arshiv zip shamel masir-e mashkook/traversal ast."
-      fi
-      unzip -o "$file" -d "$dest" >/dev/null
+      validate_zip_archive "$file" || die "arshiv zip shamel masir-e mashkook/traversal ast."
+      unzip -q -o "$file" -d "$dest" >/dev/null || die "estekhraj-e zip shekast khord."
       fix_backslash_names "$dest"
       ;;
     *.tar.gz|*.tgz)
-      if tar -tzf "$file" 2>/dev/null | grep -E '(^/|\.\.)'; then
-        die "arshiv tar.gz shamel masir-e mashkook/traversal ast."
-      fi
-      tar -xzf "$file" -C "$dest"
+      validate_tar_archive "$file" || die "arshiv tar.gz shamel masir-e mashkook/traversal ast."
+      tar --no-same-owner -xzf "$file" -C "$dest" || die "estekhraj-e tar.gz shekast khord."
       ;;
     *.tar)
-      if tar -tf "$file" 2>/dev/null | grep -E '(^/|\.\.)'; then
-        die "arshiv tar shamel masir-e mashkook/traversal ast."
-      fi
-      tar -xf "$file" -C "$dest"
+      validate_tar_archive "$file" || die "arshiv tar shamel masir-e mashkook/traversal ast."
+      tar --no-same-owner -xf "$file" -C "$dest" || die "estekhraj-e tar shekast khord."
       ;;
     *)
-      if head -c 2 "$file" | grep -q "PK"; then
-        if unzip -l "$file" 2>/dev/null | awk '{print $4}' | grep -E '(^/|\.\.)'; then
-          die "arshiv zip shamel masir-e mashkook/traversal ast."
-        fi
-        unzip -o "$file" -d "$dest" >/dev/null
+      if head -c 2 "$file" 2>/dev/null | grep -q "PK"; then
+        command -v unzip >/dev/null 2>&1 || die "unzip nasb nist."
+        validate_zip_archive "$file" || die "arshiv zip shamel masir-e mashkook/traversal ast."
+        unzip -q -o "$file" -d "$dest" >/dev/null || die "estekhraj-e zip shekast khord."
         fix_backslash_names "$dest"
       else
-        if tar -tzf "$file" 2>/dev/null | grep -E '(^/|\.\.)'; then
-          die "arshiv shamel masir-e mashkook/traversal ast."
-        fi
-        tar -xzf "$file" -C "$dest" 2>/dev/null || die "frmt file nashenakhte ast."
+        validate_tar_archive "$file" || die "arshiv shamel masir-e mashkook/traversal ast."
+        tar --no-same-owner -xzf "$file" -C "$dest" 2>/dev/null || die "frmt file nashenakhte ast."
       fi
       ;;
   esac

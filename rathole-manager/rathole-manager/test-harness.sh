@@ -14,6 +14,14 @@ case "$(uname -s 2>/dev/null)" in
 esac
 trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/bin" "$ROOT/etc/rathole" "$ROOT/etc/rathole-manager" "$ROOT/etc/nginx/conf.d" "$ROOT/etc/nginx/stream.d"
+cat > "$ROOT/etc/nginx/nginx.conf" <<'EOF'
+events {
+    worker_connections 1024;
+}
+http {
+    include /etc/nginx/conf.d/*.conf;
+}
+EOF
 
 # jq: agar jq-linux (binary-e ELF baraye WSL/Linux) knar-e script bashad az an estefade kon
 if [ -f "$BASE/jq-linux" ] && head -c4 "$BASE/jq-linux" 2>/dev/null | grep -q ELF; then
@@ -44,12 +52,12 @@ echo "sandbox: $ROOT ; jq: $(jq --version)"
 # hala sarih die mikonad. pas knar-e nskhh-ye sandbox mizarimesh ta SCRIPT_DIR peydash konad.
 sed 's/\r$//' "$BASE/common.sh" > "$ROOT/common.sh"
 
-# nskhh tst az ratholectl ba msirhai sandbox.
 sed \
   -e "s#^STATE=.*#STATE=\"$ROOT/etc/rathole-manager/state.json\"#" \
   -e "s#^SERVER_TOML=.*#SERVER_TOML=\"$ROOT/etc/rathole/server.toml\"#" \
   -e "s#^NGINX_CONF=.*#NGINX_CONF=\"$ROOT/etc/nginx/conf.d/rathole.conf\"#" \
   -e "s#^STREAM_CONF=.*#STREAM_CONF=\"$ROOT/etc/nginx/stream.d/rathole-stream.conf\"#" \
+  -e "s#^NGINX_MAIN_CONF=.*#NGINX_MAIN_CONF=\"$ROOT/etc/nginx/nginx.conf\"#" \
   -e 's/\r$//' \
   "$BASE/ratholectl" > "$ROOT/ratholectl.lib"
 
@@ -84,6 +92,7 @@ set -uo pipefail
 export PATH="$ROOT/bin:\$PATH"
 # LIB_ONLY: jelo-ye ejra-ye main hangam-e source ra migirad
 export RATHOLECTL_LIB_ONLY=1
+export NGINX_MAIN_CONF="$ROOT/etc/nginx/nginx.conf"
 source "$ROOT/ratholectl.lib"
 # khnsisazi tavabe niazmnd system vaghai
 need_root(){ :; }
@@ -295,14 +304,42 @@ fi
 line "tst 18: barresi-ye fail-closed dar lock timeout (P1-03)"
 export RTH_LOCK="$ROOT/ratholectl.lock"
 export RTH_LOCK_TIMEOUT=1
-LOCK_DIR="${RTH_LOCK}.d"
-mkdir -p "$LOCK_DIR"
-if bash "$RUN" rth_with_lock cmd_add lockfail 2087 2>/dev/null; then
-  assert_ok 1 "hangam-e vojood-e ghofl mutation bayad fail-closed shavad"
+touch "$RTH_LOCK"
+PRE_LOCK_NODES="$(jq -r '.nodes | length' "$ROOT/etc/rathole-manager/state.json" 2>/dev/null || echo 0)"
+
+if command -v flock >/dev/null 2>&1; then
+  ( exec 8>"$RTH_LOCK"; flock -x 8; sleep 3 ) &
+  BG_PID=$!
+  sleep 0.2
+  if bash "$RUN" rth_with_lock cmd_add lockfail 2087 2>/dev/null; then
+    assert_ok 1 "hangam-e vojood-e flock mutation bayad fail-closed shavad"
+  else
+    assert_ok 0 "hangam-e vojood-e flock mutation fail-closed kard"
+  fi
+  wait $BG_PID 2>/dev/null || true
+  POST_LOCK_NODES="$(jq -r '.nodes | length' "$ROOT/etc/rathole-manager/state.json" 2>/dev/null || echo 0)"
+  assert_eq "$POST_LOCK_NODES" "$PRE_LOCK_NODES" "state dast-nakhorde mand pas az timeout-e flock"
+
+  mkdir -p "$ROOT/unopenable.lock"
+  if RTH_LOCK="$ROOT/unopenable.lock" bash "$RUN" rth_with_lock cmd_add lockopenfail 2088 2>/dev/null; then
+    assert_ok 1 "hangam-e baz-nashodan-e file-e lock bayad fail-closed shavad"
+  else
+    assert_ok 0 "hangam-e baz-nashodan-e file-e lock fail-closed kard"
+  fi
+  POST_LOCK_NODES2="$(jq -r '.nodes | length' "$ROOT/etc/rathole-manager/state.json" 2>/dev/null || echo 0)"
+  assert_eq "$POST_LOCK_NODES2" "$PRE_LOCK_NODES" "state dast-nakhorde mand pas az shekaste baz kardan-e lock"
 else
-  assert_ok 0 "hangam-e vojood-e ghofl mutation fail-closed kard"
+  LOCK_DIR="${RTH_LOCK}.d"
+  mkdir -p "$LOCK_DIR"
+  if bash "$RUN" rth_with_lock cmd_add lockfail_mkdir 2087 2>/dev/null; then
+    assert_ok 1 "hangam-e vojood-e ghofl-e mkdir mutation bayad fail-closed shavad"
+  else
+    assert_ok 0 "hangam-e vojood-e ghofl-e mkdir mutation fail-closed kard"
+  fi
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  POST_LOCK_NODES="$(jq -r '.nodes | length' "$ROOT/etc/rathole-manager/state.json" 2>/dev/null || echo 0)"
+  assert_eq "$POST_LOCK_NODES" "$PRE_LOCK_NODES" "state dast-nakhorde mand pas az timeout-e mkdir"
 fi
-rmdir "$LOCK_DIR" 2>/dev/null || true
 
 line "tst 19: adaptive Python probe rooye connection-e baz (P2-02)"
 if [ "${WSUP:-0}" = 1 ]; then
@@ -325,6 +362,74 @@ print(status)
   assert_eq "$PY_RES" "101" "Python adaptive probe 101 ra daryaft kard va hang nakard"
   [ -n "${WSPID:-}" ] && kill $WSPID 2>/dev/null || true
 fi
+
+line "tst 20: ensure_stream_include bedoon stream block mojood"
+cat > "$ROOT/etc/nginx/nginx.conf" <<'EOF'
+events { worker_connections 1024; }
+http { include /etc/nginx/conf.d/*.conf; }
+EOF
+bash "$RUN" ensure_stream_include
+grep -q 'include.*stream\.d/\*\.conf;' "$ROOT/etc/nginx/nginx.conf"
+assert_ok $? "stream block ba include be nginx.conf ezafe shod"
+[ -f "$ROOT/etc/nginx/nginx.conf.l4.bak" ]
+assert_ok $? "backup .l4.bak sakhte shod"
+
+line "tst 21: ensure_stream_include ba stream block mojood"
+cat > "$ROOT/etc/nginx/nginx.conf" <<'EOF'
+events { worker_connections 1024; }
+http { include /etc/nginx/conf.d/*.conf; }
+stream {
+    # existing custom stream config
+    include /custom/stream.conf;
+}
+EOF
+bash "$RUN" ensure_stream_include
+grep -q 'include.*stream\.d/\*\.conf;' "$ROOT/etc/nginx/nginx.conf"
+assert_ok $? "include dakhel-e stream block-e mojood inject shod"
+
+line "tst 22: ensure_stream_include idempotency"
+PRE_SHA="$(sha256sum "$ROOT/etc/nginx/nginx.conf" | cut -d' ' -f1)"
+bash "$RUN" ensure_stream_include
+POST_SHA="$(sha256sum "$ROOT/etc/nginx/nginx.conf" | cut -d' ' -f1)"
+assert_eq "$POST_SHA" "$PRE_SHA" "ensure_stream_include idempotent ast va file ra taghir nadad"
+
+line "tst 23: host isolation — /etc/nginx/nginx.conf nabayad dast khorde bashad"
+if [ -f /etc/nginx/nginx.conf ]; then
+  if grep -q "$ROOT" /etc/nginx/nginx.conf 2>/dev/null; then
+    assert_ok 1 "host /etc/nginx/nginx.conf dast khorde ast!"
+  else
+    assert_ok 0 "host /etc/nginx/nginx.conf dast-nakhorde mand"
+  fi
+else
+  assert_ok 0 "host /etc/nginx/nginx.conf vojood nadarad (safe)"
+fi
+
+line "tst 24: transactional state mutation baraye Game (add & rm)"
+bash "$RUN" cmd_game_add testgame 20001 game.example.com >/dev/null 2>&1
+GAME_SNI="$(jq -r '.nodes[]|select(.name=="testgame")|.sni' "$ROOT/etc/rathole-manager/state.json" 2>/dev/null || echo '')"
+assert_eq "$GAME_SNI" "game.example.com" "game testgame ba transactional state ezafe shod"
+bash "$RUN" cmd_game_rm testgame >/dev/null 2>&1
+HAS_GAME="$(jq -r '.nodes[]|select(.name=="testgame")' "$ROOT/etc/rathole-manager/state.json" 2>/dev/null || echo '')"
+assert_eq "$HAS_GAME" "" "game testgame ba transactional state hazf shod"
+
+line "tst 25: safe_kv_set and safe_svc_del (special characters & exact matching)"
+cat > "$ROOT/test.env" <<'EOF'
+FOO=bar
+BAZ=qux
+EOF
+# Source node functions into a subshell to test
+(
+  export ENV_FILE="$ROOT/test.env"
+  err(){ printf '%s\n' "$*" >&2; }
+  eval "$(sed -n '/^safe_kv_set(){/,/^}/p;/^safe_kv_del(){/,/^}/p;/^safe_svc_del(){/,/^}/p' "$BASE/ratholenode")"
+  safe_kv_set "$ROOT/test.env" TEST_SPECIAL "val&with#hash/slash\\backslash and spaces" || exit 1
+  READ_VAL="$(grep '^TEST_SPECIAL=' "$ROOT/test.env" | cut -d= -f2-)"
+  [ "$READ_VAL" = "val&with#hash/slash\\backslash and spaces" ] || exit 2
+  safe_kv_del "$ROOT/test.env" TEST_SPECIAL || exit 3
+  grep -q '^TEST_SPECIAL=' "$ROOT/test.env" && exit 4
+  exit 0
+)
+assert_ok $? "safe_kv_set va safe_kv_del ba carakterhaye khas movafagh bood"
 
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"

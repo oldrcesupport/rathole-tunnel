@@ -83,12 +83,21 @@ install_prereqs(){
   command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 && return 0
   log "nasb pish-niazha (curl tar unzip ca-certificates)..."
   local pkgs="curl unzip tar ca-certificates"
-  if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y $pkgs
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y $pkgs
-  elif command -v yum >/dev/null 2>&1; then yum install -y $pkgs
-  elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm curl unzip tar ca-certificates
-  elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl unzip tar ca-certificates bash
+  if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y $pkgs || warn "apt-get install ba khata movajeh shod."
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y $pkgs || warn "dnf install ba khata movajeh shod."
+  elif command -v yum >/dev/null 2>&1; then yum install -y $pkgs || warn "yum install ba khata movajeh shod."
+  elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm curl unzip tar ca-certificates || warn "pacman install ba khata movajeh shod."
+  elif command -v apk >/dev/null 2>&1; then apk add --no-cache curl unzip tar ca-certificates bash || warn "apk install ba khata movajeh shod."
   else warn "pkijmnijr shnakhth nshd; motmaen shv curl/unzip/tar nasb-and."; fi
+
+  local missing=()
+  command -v tar >/dev/null 2>&1 || missing+=("tar")
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    missing+=("curl/wget")
+  fi
+  if [ "${#missing[@]}" -gt 0 ]; then
+    die "abzarhaye lazem nasb nashodand: ${missing[*]}. lotfan anha ra dasti nasb kon."
+  fi
 }
 
 fetch1(){ # $1=url $2=out ; ba curl ya wget (yek talash)

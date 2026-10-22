@@ -32,6 +32,133 @@ rth_mktempd(){
   printf '%s\n' "$d"
 }
 
+# Tavabe amn baraye taghir va hazf dar file-haye env va conf
+safe_kv_set(){
+  local file="$1" key="$2" val="$3"
+  [ -n "$file" ] && [ -n "$key" ] || return 1
+  if ! echo "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    err "safe_kv_set: kelid namotabar ast: $key"
+    return 1
+  fi
+  case "$val" in
+    *$'\n'*|*$'\r'*)
+      err "safe_kv_set: meghdar nabayad shamel-e khat-e jadid bashad"
+      return 1
+      ;;
+  esac
+  local dir; dir="$(dirname "$file")"
+  mkdir -p "$dir" 2>/dev/null || true
+  local tmp
+  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+
+  if [ -f "$file" ]; then
+    SAFE_KEY="$key" SAFE_VAL="$val" awk '
+      BEGIN {
+        k = ENVIRON["SAFE_KEY"]
+        v = ENVIRON["SAFE_VAL"]
+        found = 0
+      }
+      {
+        if (index($0, k "=") == 1) {
+          if (!found) {
+            print k "=" v
+            found = 1
+          }
+        } else {
+          print $0
+        }
+      }
+      END {
+        if (!found) {
+          print k "=" v
+        }
+      }
+    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+  else
+    printf '%s=%s\n' "$key" "$val" > "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+
+  local written
+  written="$(grep -E "^${key}=" "$tmp" 2>/dev/null | head -n1)"
+  if [ "$written" != "${key}=${val}" ]; then
+    rm -f "$tmp"
+    err "safe_kv_set: etebarsanji pas az neveshtan shekast khord"
+    return 1
+  fi
+
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$file" 2>/dev/null || true
+  return 0
+}
+
+safe_kv_del(){
+  local file="$1"; shift
+  [ -f "$file" ] || return 0
+  [ $# -gt 0 ] || return 0
+  local k
+  for k in "$@"; do
+    if ! echo "$k" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+      err "safe_kv_del: kelid namotabar ast: $k"
+      return 1
+    fi
+  done
+
+  local tmp
+  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+
+  local del_keys="$*"
+  DEL_KEYS="$del_keys" awk '
+    BEGIN {
+      split(ENVIRON["DEL_KEYS"], arr, " ")
+      for (i in arr) {
+        del[arr[i]] = 1
+      }
+    }
+    {
+      eq = index($0, "=")
+      if (eq > 1) {
+        k = substr($0, 1, eq - 1)
+        if (k in del) next
+      }
+      print $0
+    }
+  ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$file" 2>/dev/null || true
+  return 0
+}
+
+safe_svc_del(){
+  local file="$1" name="$2"
+  [ -f "$file" ] || return 0
+  [ -n "$name" ] || return 1
+  case "$name" in
+    *$'\n'*|*$'\r'*|*'|'*)
+      err "safe_svc_del: name-e service namotabar ast"
+      return 1
+      ;;
+  esac
+
+  local tmp
+  tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+
+  TARGET_NAME="$name" awk -F'|' '
+    BEGIN { target = ENVIRON["TARGET_NAME"] }
+    {
+      if ($1 == target) next;
+      print $0;
+    }
+  ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$file" 2>/dev/null || true
+  return 0
+}
+
 ENV_FILE="/etc/rathole/node.env"
 SVC_FILE="/etc/rathole/services.conf"
 CLIENT_TOML="/etc/rathole/client.toml"
@@ -171,11 +298,11 @@ restart_svc(){
   fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable "$SVC" >/dev/null 2>&1 || true
-  if systemctl restart "$SVC" 2>/dev/null; then
+  if systemctl restart "$SVC" 2>/dev/null && systemctl is-active --quiet "$SVC"; then
     log "$SVC restart shod."
     return 0
   else
-    err "restart $SVC shekast khord."
+    err "restart $SVC shekast khord; log: journalctl -u $SVC -n 30 --no-pager"
     return 1
   fi
 }
@@ -192,11 +319,11 @@ reload_svc(){
     log "client.toml berooz shd; rathole hot-reload mikonad (tunnelhaye faal mesl game ghat nmishvnd)."
     return 0
   else
-    if systemctl start "$SVC" 2>/dev/null; then
+    if systemctl start "$SVC" 2>/dev/null && systemctl is-active --quiet "$SVC"; then
       log "$SVC start shod."
       return 0
     else
-      err "start $SVC shekast khord."
+      err "start $SVC shekast khord; log: journalctl -u $SVC -n 30 --no-pager"
       return 1
     fi
   fi
@@ -235,7 +362,7 @@ cmd_add_svc(){
   touch "$SVC_FILE"; chmod 600 "$SVC_FILE"
   if svc_exists "$name"; then
     warn "service '$name' vojood dard; beroozresani mishavad."
-    sed -i "/^$name|/d" "$SVC_FILE"
+    safe_svc_del "$SVC_FILE" "$name"
   fi
   echo "${name}|${token}|${inbound}" >> "$SVC_FILE"
   log "service '$name' → 127.0.0.1:$inbound ezafe shod (haman tunnel)."
@@ -248,7 +375,7 @@ cmd_rm_svc(){
   [ -n "$name" ] || die "estefade: ratholenode rm-svc <name>"
   valid_svc_name "$name" || die "name namotabar."
   svc_exists "$name" || die "service '$name' peyda nashod."
-  sed -i "/^$name|/d" "$SVC_FILE"
+  safe_svc_del "$SVC_FILE" "$name"
   log "service '$name' hazf shod."
   cmd_apply
 }
@@ -326,8 +453,8 @@ cmd_set_main(){
     [ -f "$trust" ] || die "trusted_root peyda nashod: $trust"
   fi
   env_set SERVER "$server"
-  if [ -n "$hostname" ]; then env_set TLS_HOSTNAME "$hostname"; else sed -i '/^TLS_HOSTNAME=/d' "$ENV_FILE" 2>/dev/null || true; fi
-  if [ -n "$trust" ]; then env_set TLS_TRUSTED_ROOT "$trust"; else sed -i '/^TLS_TRUSTED_ROOT=/d' "$ENV_FILE" 2>/dev/null || true; fi
+  if [ -n "$hostname" ]; then env_set TLS_HOSTNAME "$hostname"; else safe_kv_del "$ENV_FILE" TLS_HOSTNAME; fi
+  if [ -n "$trust" ]; then env_set TLS_TRUSTED_ROOT "$trust"; else safe_kv_del "$ENV_FILE" TLS_TRUSTED_ROOT; fi
   log "tunnel asli set shod: dial=$server${hostname:+ tls_hostname=$hostname}${trust:+ trusted_root=$trust}"
   if [ -f "$SVC_FILE" ] && grep -qvE '^\s*(#|$)' "$SVC_FILE" 2>/dev/null; then cmd_apply; else warn "hanoz service-i nist; tanzimat zakhire shod."; fi
 }
@@ -447,8 +574,7 @@ BH_CLI_UNIT="/etc/systemd/system/${BH_CLI_SVC}.service"
 BH_TOML=/etc/rathole/backhaul-client.toml
 
 env_set(){ # $1=key $2=value (dar node.env)
-  touch "$ENV_FILE"; chmod 600 "$ENV_FILE" 2>/dev/null || true
-  if grep -qE "^$1=" "$ENV_FILE"; then sed -i "s#^$1=.*#$1=$2#" "$ENV_FILE"; else echo "$1=$2" >> "$ENV_FILE"; fi
+  safe_kv_set "$ENV_FILE" "$1" "$2"
 }
 
 install_kcptun_client(){
@@ -710,7 +836,7 @@ cmd_backhaul(){
       backhaul_mux_profile "$profile" >/dev/null || die "profile namotabar (balanced|lossy|aggressive)."
       install_backhaul client
       env_set BH_REMOTE_ADDR "$remote"
-      sed -i '/^BH_REMOTE=/d' "$ENV_FILE" 2>/dev/null || true
+      safe_kv_del "$ENV_FILE" BH_REMOTE
       env_set BH_TOKEN "$token"
       env_set BH_TRANSPORT "$transport"
       env_set BH_PROFILE "$profile"
@@ -718,7 +844,12 @@ cmd_backhaul(){
       gen_backhaul_client_toml
       gen_backhaul_client_unit
       systemctl enable "$BH_CLI_SVC" >/dev/null 2>&1 || true
-      systemctl restart "$BH_CLI_SVC" 2>/dev/null && log "$BH_CLI_SVC start shod (mux → ${remote}, transport=${transport}, profile=${profile})." || err "start nashod; log: journalctl -u $BH_CLI_SVC -n 30"
+      if systemctl restart "$BH_CLI_SVC" 2>/dev/null && systemctl is-active --quiet "$BH_CLI_SVC"; then
+        log "$BH_CLI_SVC start shod (mux → ${remote}, transport=${transport}, profile=${profile})."
+      else
+        err "start $BH_CLI_SVC shekast khord; log: journalctl -u $BH_CLI_SVC -n 30 --no-pager"
+        return 1
+      fi
       case "$transport" in
         ws|wsmux) warn "in masir TLS nadarad؛ baraye ramznegari/camouflage az wss/wssmux ya Noise estefade kon." ;;
         wss|wssmux)
@@ -739,7 +870,7 @@ cmd_backhaul(){
       systemctl disable --now "$BH_CLI_SVC" 2>/dev/null || true
       rm -f "$BH_CLI_UNIT" "$BH_TOML"; systemctl daemon-reload 2>/dev/null || true
       # pak kardan env-haye backhaul az node.env
-      sed -i '/^BH_REMOTE=/d;/^BH_REMOTE_ADDR=/d;/^BH_TOKEN=/d;/^BH_TRANSPORT=/d;/^BH_PROFILE=/d' "$ENV_FILE" 2>/dev/null || true
+      safe_kv_del "$ENV_FILE" BH_REMOTE BH_REMOTE_ADDR BH_TOKEN BH_TRANSPORT BH_PROFILE
       # bargasht be tunnel-e pishfarz (ws/443) va roshan kardan-e dobare-ye rathole-client.
       env_set TUNNEL ws
       gen_client
@@ -811,8 +942,11 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
       systemctl daemon-reload
-      systemctl enable --now ${FAKEWEB_SVC}
-      log "web fik rooye 127.0.0.1:${port} bala amad (baraye fallback inbound)."
+      if systemctl enable --now ${FAKEWEB_SVC} 2>/dev/null && systemctl is-active --quiet ${FAKEWEB_SVC}; then
+        log "web fik rooye 127.0.0.1:${port} bala amad (baraye fallback inbound)."
+      else
+        die "start ${FAKEWEB_SVC} shekast khord; log: journalctl -u ${FAKEWEB_SVC} -n 30 --no-pager"
+      fi
       ;;
     stop)
       systemctl stop ${FAKEWEB_SVC} 2>/dev/null && log "web fik motevaghef shod." || warn "web fik ejra naboodan."
@@ -933,8 +1067,7 @@ gen_up_client(){
 
 # ---------- kcp baraye upstream (har server airan, tunnel FEC jda) ----------
 kv_set(){ # $1=file $2=key $3=val
-  touch "$1"
-  if grep -qE "^$2=" "$1"; then sed -i "s#^$2=.*#$2=$3#" "$1"; else echo "$2=$3" >> "$1"; fi
+  safe_kv_set "$1" "$2" "$3"
 }
 
 # entekhab port lvkal azad baraye kcp-client hai mkhtlf (main=29900, upstreamha az 29901)
@@ -1080,7 +1213,12 @@ up_apply(){
   if systemctl is-active --quiet "rathole-client@${id}"; then
     log "client-${id}.toml berooz shd; hot-reload (bedoon ghati)."
   else
-    systemctl start "rathole-client@${id}" 2>/dev/null && log "rathole-client@${id} start shod." || warn "start rathole-client@${id} nashod."
+    if systemctl start "rathole-client@${id}" 2>/dev/null && systemctl is-active --quiet "rathole-client@${id}"; then
+      log "rathole-client@${id} start shod."
+    else
+      err "start rathole-client@${id} shekast khord; log: journalctl -u rathole-client@${id} -n 30 --no-pager"
+      return 1
+    fi
   fi
 }
 
@@ -1090,7 +1228,12 @@ up_restart(){
   ensure_client_template
   gen_up_client "$id"
   systemctl enable "rathole-client@${id}" >/dev/null 2>&1 || true
-  systemctl restart "rathole-client@${id}" 2>/dev/null && log "rathole-client@${id} restart shod." || warn "restart rathole-client@${id} nashod."
+  if systemctl restart "rathole-client@${id}" 2>/dev/null && systemctl is-active --quiet "rathole-client@${id}"; then
+    log "rathole-client@${id} restart shod."
+  else
+    err "restart rathole-client@${id} shekast khord; log: journalctl -u rathole-client@${id} -n 30 --no-pager"
+    return 1
+  fi
 }
 
 cmd_upstream(){
@@ -1116,7 +1259,7 @@ cmd_upstream(){
       valid_svc_token "$token" || die "token namotabar (faghat [A-Za-z0-9._=+/-] mjaz ast)."
       echo "$inbound" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
       check_port_conflict "$inbound" "upstream '$id' service '$name'" || die "tadakhol port — meghdar digari entekhab kon."
-      grep -qE "^${name}\|" "$(up_svc "$id")" 2>/dev/null && sed -i "/^${name}|/d" "$(up_svc "$id")"
+      safe_svc_del "$(up_svc "$id")" "$name"
       echo "${name}|${token}|${inbound}" >> "$(up_svc "$id")"
       log "service '$name' be upstream '$id' ezafe shod."
       up_apply "$id"
@@ -1125,7 +1268,7 @@ cmd_upstream(){
       local id="${1:-}" name="${2:-}"
       [ -n "$id" ] && [ -n "$name" ] || die "estefade: ratholenode upstream rm-svc <id> <name>"
       valid_svc_name "$name" || die "name namotabar."
-      sed -i "/^${name}|/d" "$(up_svc "$id")" 2>/dev/null
+      safe_svc_del "$(up_svc "$id")" "$name"
       up_apply "$id"; log "service '$name' az upstream '$id' hazf shod."
       ;;
     rm)
@@ -1246,8 +1389,12 @@ AccuracySec=5s
 WantedBy=timers.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now rathole-watchdog.timer 2>/dev/null
-  log "watchdog roshan shod (har ${interval}s check mikonad va tunnel gir-karde ra restart mikonad)."
+  if systemctl enable --now rathole-watchdog.timer 2>/dev/null && systemctl is-active --quiet rathole-watchdog.timer; then
+    log "watchdog roshan shod (har ${interval}s check mikonad va tunnel gir-karde ra restart mikonad)."
+  else
+    err "enable/start rathole-watchdog.timer shekast khord; log: journalctl -u rathole-watchdog.timer -n 30 --no-pager"
+    return 1
+  fi
 }
 
 wd_off(){
@@ -1730,7 +1877,10 @@ RandomizedDelaySec=5s
 WantedBy=timers.target
 TIMER
         systemctl daemon-reload 2>/dev/null || true
-        systemctl enable --now rathole-adaptive.timer 2>/dev/null || true
+        if ! (systemctl enable --now rathole-adaptive.timer 2>/dev/null && systemctl is-active --quiet rathole-adaptive.timer); then
+          err "enable/start rathole-adaptive.timer shekast khord; log: journalctl -u rathole-adaptive.timer -n 30 --no-pager"
+          return 1
+        fi
       fi
       log "adaptive on shod (interval=${interval}s, failures=${failures}, recoveries=${recoveries})."
       ;;
@@ -1740,7 +1890,7 @@ TIMER
         systemctl disable --now rathole-adaptive.timer 2>/dev/null || true
       fi
       if [ -f "$ADAPTIVE_ENV" ]; then
-        sed -i 's/^ADAPTIVE_ENABLED=.*/ADAPTIVE_ENABLED=0/' "$ADAPTIVE_ENV"
+        safe_kv_set "$ADAPTIVE_ENV" ADAPTIVE_ENABLED 0
       fi
       log "adaptive off shod (mode-e feli hefz shod)."
       ;;
@@ -1891,24 +2041,45 @@ main(){
 # fallback-e mkdir baraye sistem-haye bedoon-e flock (hamsan-e rth_commit_config).
 RTH_LOCK="${RTH_LOCK:-/run/ratholenode.lock}"
 rth_with_lock(){
-  mkdir -p "$(dirname "$RTH_LOCK")" 2>/dev/null || RTH_LOCK="/tmp/ratholenode.lock"
+  local lockdir; lockdir="$(dirname "$RTH_LOCK")"
+  if ! mkdir -p "$lockdir" 2>/dev/null && [ ! -d "$lockdir" ]; then
+    local uid; uid="$(id -u 2>/dev/null || echo 0)"
+    local udir="${TMPDIR:-/tmp}/rth-run-${uid}"
+    mkdir -m 700 -p "$udir" 2>/dev/null || true
+    if [ -d "$udir" ] && [ -O "$udir" ] && [ ! -L "$udir" ]; then
+      RTH_LOCK="${udir}/ratholenode.lock"
+      lockdir="$udir"
+    else
+      err "nemitoonam directory-e ghofl ra besazam: $lockdir (fail-closed)."
+      return 1
+    fi
+  fi
+
   local timeout_sec="${RTH_LOCK_TIMEOUT:-30}"
+  case "$timeout_sec" in
+    ''|*[!0-9]*) timeout_sec=30 ;;
+    *) [ "$timeout_sec" -gt 0 ] 2>/dev/null || timeout_sec=30 ;;
+  esac
+
   if command -v flock >/dev/null 2>&1; then
-    # BEHRANI: `exec 9>file 2>/dev/null` (bedoon-e command) redirect ra DAEMI mikonad —
-    # yaani stderr-e KOL-e process ta akhar be /dev/null miraft va HAMEYE payam-haye
-    # err/die BI-SEDA gom mishodand (masalan rahnama-ye «--domain bede» dar init: karbar
-    # faghat «init shekast khord» ra midid). ba group، 2>/dev/null faghat baraye hamin
-    # exec eemal mishavad va fd 9 ham hamchenan set mishavad.
-    { exec 9>"$RTH_LOCK"; } 2>/dev/null || { "$@"; return $?; }
+    # BEHRANI: agar baz kardan fd 9 shekast bokhorad, bayad FAIL-CLOSED konad, na inke "$@" bedoon ghofl ejra shavad!
+    if ! { exec 9>"$RTH_LOCK"; } 2>/dev/null; then
+      err "baz kardan-e file-e ghofl shekast khord: $RTH_LOCK; amaliat baraye jelogiri az race condition motavaghef shod."
+      return 1
+    fi
     if ! flock -w "$timeout_sec" 9; then
-      err "ghofl-e state azad nashod (${timeout_sec}s timeout). baraye jelogiri az race condition amaliat motevaghef shod."
+      err "ghofl-e state azad nashod (flock timeout ${timeout_sec}s); amaliat baraye jelogiri az race condition motavaghef shod."
       exec 9>&-
       return 1
     fi
-    "$@"; local rc=$?
+    RTH_LOCK_HELD=1
+    local rc=0
+    "$@" || rc=$?
+    RTH_LOCK_HELD=0
     exec 9>&-
     return $rc
   fi
+
   local d="${RTH_LOCK}.d" i=0 held=0
   local max_tries=$((timeout_sec * 10))
   [ "$max_tries" -ge 1 ] 2>/dev/null || max_tries=1
@@ -1917,10 +2088,13 @@ rth_with_lock(){
     i=$((i+1)); sleep 0.1 2>/dev/null || sleep 1
   done
   if [ "$held" -ne 1 ]; then
-    err "ghofl-e state azad nashod (timeout). baraye jelogiri az race condition amaliat motevaghef shod."
+    err "ghofl-e state azad nashod (mkdir timeout ${timeout_sec}s); amaliat baraye jelogiri az race condition motavaghef shod."
     return 1
   fi
-  "$@"; local rc=$?
+  RTH_LOCK_HELD=1
+  local rc=0
+  "$@" || rc=$?
+  RTH_LOCK_HELD=0
   rmdir "$d" 2>/dev/null
   return $rc
 }
