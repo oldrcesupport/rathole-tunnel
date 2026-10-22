@@ -35,3 +35,6 @@ Thumbs.db
 *.pem
 *.key
 *.csr
+
+# Prompts and local instructions
+*-prompt.md

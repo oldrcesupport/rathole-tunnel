@@ -287,23 +287,123 @@ health_check(){ # $@ = naghsh-ha ; return 0 = salem, 1 = kharab
   return "$bad"
 }
 
+_rth_validate_archive_python(){
+  local archive="$1" type="$2"
+  local py=""
+  if command -v python3 >/dev/null 2>&1; then py=python3
+  elif command -v python >/dev/null 2>&1; then py=python
+  fi
+  [ -n "$py" ] || return 2
+  "$py" - "$archive" "$type" <<'PYEOF'
+import sys, os
+
+archive, atype = sys.argv[1], sys.argv[2]
+if not os.path.isfile(archive) or os.path.getsize(archive) == 0:
+    sys.exit(1)
+
+def is_safe_relpath(p):
+    if not p:
+        return False
+    if p.startswith('/') or (len(p) > 1 and p[1] == ':'):
+        return False
+    norm = p.replace('\\', '/')
+    parts = norm.split('/')
+    if '..' in parts:
+        return False
+    return True
+
+if atype in ("tar", "tar.gz", "tgz"):
+    import tarfile
+    try:
+        with tarfile.open(archive, 'r:*') as tf:
+            members = tf.getmembers()
+            if not members:
+                sys.exit(1)
+            for m in members:
+                if not is_safe_relpath(m.name):
+                    sys.exit(1)
+                if m.isdev() or m.ischr() or m.isblk() or m.isfifo():
+                    sys.exit(1)
+                if m.issym() or m.islnk():
+                    target = m.linkname
+                    if target.startswith('/') or (len(target) > 1 and target[1] == ':'):
+                        sys.exit(1)
+                    if '..' in target.replace('\\', '/').split('/'):
+                        sys.exit(1)
+    except Exception:
+        sys.exit(1)
+else:
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
 validate_tar_archive(){
   local archive="$1"
   [ -f "$archive" ] || return 1
+  [ -s "$archive" ] || return 1
+
+  local py_rc=0
+  _rth_validate_archive_python "$archive" "tar"
+  py_rc=$?
+  if [ "$py_rc" -eq 0 ]; then return 0; fi
+  if [ "$py_rc" -eq 1 ]; then return 1; fi
+
+  command -v tar >/dev/null 2>&1 || return 1
+  local tmp_list; tmp_list="$(mktemp 2>/dev/null || echo "${archive}.list.$$")"
+
+  if ! tar -tvf "$archive" > "$tmp_list" 2>/dev/null || [ ! -s "$tmp_list" ]; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_tar_archive: tar archive kharab ya gheyre-ghabel-e baz kardan ast"
+    return 1
+  fi
+
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      l*|c*|b*|p*)
+        err "validate_tar_archive: special file/symlink dar tar mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+      *" -> "*)
+        err "validate_tar_archive: symlink/hardlink target dar tar mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+      *" link to "*)
+        err "validate_tar_archive: hardlink dar tar mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+    esac
+  done < "$tmp_list"
+
+  if ! tar -tf "$archive" > "$tmp_list" 2>/dev/null || [ ! -s "$tmp_list" ]; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_tar_archive: tar -tf shekast khord"
+    return 1
+  fi
+
   local entry
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
       /*|[A-Za-z]:*)
-        err "validate_tar_archive: masir-e motlagh dar archive mojaz nist: $entry"
+        err "validate_tar_archive: masir-e motlagh dar tar mojaz nist: $entry"
+        rm -f "$tmp_list" 2>/dev/null
         return 1
         ;;
     esac
     if echo "$entry" | grep -qE '(^|/|\\)\.\.(/|\\|$)'; then
-      err "validate_tar_archive: path traversal (..) dar archive mojaz nist: $entry"
+      err "validate_tar_archive: path traversal (..) dar tar mojaz nist: $entry"
+      rm -f "$tmp_list" 2>/dev/null
       return 1
     fi
-  done < <(tar -tf "$archive" 2>/dev/null)
+  done < "$tmp_list"
+
+  rm -f "$tmp_list" 2>/dev/null
   return 0
 }
 

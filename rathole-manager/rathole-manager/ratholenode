@@ -32,6 +32,63 @@ rth_mktempd(){
   printf '%s\n' "$d"
 }
 
+# Etebarsanji-ye motahed baraye upstream ID, endpoint, hostname va kcp key
+is_valid_upstream_id(){
+  local id="${1:-}"
+  [ -n "$id" ] || return 1
+  [ "$id" = "." ] && return 1
+  [ "$id" = ".." ] && return 1
+  [ "$id" = "main" ] && return 1
+  case "$id" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+validate_endpoint(){
+  local ep="${1:-}"
+  [ -n "$ep" ] || return 1
+  case "$ep" in
+    *$'\n'*|*$'\r'*|*[[:space:]]*|*[\;\|\&\`\$\<\>\(\)\'\"\\]*) return 1 ;;
+  esac
+  local ep_re='^([a-zA-Z0-9.-]+):([0-9]{1,5})$'
+  if [[ "$ep" =~ $ep_re ]]; then
+    local h="${BASH_REMATCH[1]}"
+    local p="${BASH_REMATCH[2]}"
+    is_valid_port "$p" || return 1
+    local re_start='^[a-zA-Z0-9]'
+    local re_end='[a-zA-Z0-9]$'
+    [[ "$h" =~ $re_start ]] && [[ "$h" =~ $re_end ]] || return 1
+    return 0
+  fi
+  return 1
+}
+
+validate_hostname(){
+  local h="${1:-}"
+  [ -n "$h" ] || return 1
+  case "$h" in
+    *$'\n'*|*$'\r'*|*[[:space:]]*|*[\;\|\&\`\$\<\>\(\)\'\"\\]*) return 1 ;;
+  esac
+  local re='^[a-zA-Z0-9.-]+$'
+  [[ "$h" =~ $re ]] || return 1
+  local re_start='^[a-zA-Z0-9]'
+  local re_end='[a-zA-Z0-9]$'
+  [[ "$h" =~ $re_start ]] && [[ "$h" =~ $re_end ]] || return 1
+  return 0
+}
+
+validate_kcp_key(){
+  local k="${1:-}"
+  [ -n "$k" ] || return 1
+  case "$k" in
+    *$'\n'*|*$'\r'*|*[\;\|\&\`\$\<\>\(\)\'\"\\]*) return 1 ;;
+  esac
+  local re='^[-A-Za-z0-9._=+/ ]+$'
+  [[ "$k" =~ $re ]] || return 1
+  return 0
+}
+
 # Tavabe amn baraye taghir va hazf dar file-haye env va conf
 safe_kv_set(){
   local file="$1" key="$2" val="$3"
@@ -159,9 +216,23 @@ safe_svc_del(){
   return 0
 }
 
-ENV_FILE="/etc/rathole/node.env"
-SVC_FILE="/etc/rathole/services.conf"
-CLIENT_TOML="/etc/rathole/client.toml"
+if [ "${RATHOLE_TEST_MODE:-0}" = "1" ] && [ -n "${RTH_TEST_DIR:-}" ]; then
+  ENV_FILE="${ENV_FILE:-$RTH_TEST_DIR/etc/rathole/node.env}"
+  SVC_FILE="${SVC_FILE:-$RTH_TEST_DIR/etc/rathole/services.conf}"
+  CLIENT_TOML="${CLIENT_TOML:-$RTH_TEST_DIR/etc/rathole/client.toml}"
+  KCP_CLI_UNIT="${KCP_CLI_UNIT:-$RTH_TEST_DIR/etc/systemd/system/rathole-kcp-client.service}"
+  SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-$RTH_TEST_DIR/etc/systemd/system}"
+  UP_DIR="${UP_DIR:-$RTH_TEST_DIR/etc/rathole/upstreams}"
+  UP_TOML_DIR="${UP_TOML_DIR:-$RTH_TEST_DIR/etc/rathole}"
+else
+  ENV_FILE="${ENV_FILE:-/etc/rathole/node.env}"
+  SVC_FILE="${SVC_FILE:-/etc/rathole/services.conf}"
+  CLIENT_TOML="${CLIENT_TOML:-/etc/rathole/client.toml}"
+  KCP_CLI_UNIT="${KCP_CLI_UNIT:-/etc/systemd/system/rathole-kcp-client.service}"
+  SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+  UP_DIR="${UP_DIR:-/etc/rathole/upstreams}"
+  UP_TOML_DIR="${UP_TOML_DIR:-/etc/rathole}"
+fi
 SVC="rathole-client"
 
 # TAVAJOH: c_g/c_r/c_y/log/warn/err/die/need_root/kcp_profile inja DOBARE tarif NEMISHAVAND —
@@ -293,8 +364,8 @@ gen_client(){
 # restart kamel (fght baraye taghir trnspvrt mesl kcp on/off lazem ast)
 restart_svc(){
   if ! command -v systemctl >/dev/null 2>&1; then
-    log "$SVC restart shod (systemctl mojood nist)."
-    return 0
+    err "systemctl peyda nashod؛ $SVC restart nashod."
+    return 1
   fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable "$SVC" >/dev/null 2>&1 || true
@@ -310,8 +381,8 @@ restart_svc(){
 # hot-reload: fght agar service khamoosh bood start miknd; dar ghir ainsvrt rathole khodesh config ra mikhanad (bedoon ghati)
 reload_svc(){
   if ! command -v systemctl >/dev/null 2>&1; then
-    log "$SVC reload shod (systemctl mojood nist)."
-    return 0
+    err "systemctl peyda nashod؛ $SVC reload nashod."
+    return 1
   fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable "$SVC" >/dev/null 2>&1 || true
@@ -599,14 +670,21 @@ install_kcptun_client(){
 
 gen_kcp_client_unit(){ # $1=remote $2=local $3=key $4=ds $5=ps $6=mode $7=sw $8=rw
   local remote="$1" local_ep="$2" key="$3" ds="$4" ps="$5" mode="$6" sw="$7" rw="$8"
-  cat > "$KCP_CLI_UNIT" <<UNIT
+  validate_endpoint "$remote" || die "remote endpoint namotabar: $remote"
+  validate_endpoint "$local_ep" || die "local endpoint namotabar: $local_ep"
+  validate_kcp_key "$key" || die "kcp key namotabar"
+  local udir; udir="$(dirname "$KCP_CLI_UNIT")"
+  mkdir -p "$udir"
+  local tmp; tmp="$(mktemp "$udir/.kcp_unit.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 644 "$tmp" 2>/dev/null || true
+  cat > "$tmp" <<UNIT
 [Unit]
 Description=rathole kcp-client (local TCP -> UDP+FEC to Iran)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${KCP_CLI_BIN} -r ${remote} -l ${local_ep} -key ${key} -crypt aes-128 -mode ${mode} -mtu 1350 -sndwnd ${sw} -rcvwnd ${rw} -datashard ${ds} -parityshard ${ps} -dscp 46 -nocomp
+ExecStart=${KCP_CLI_BIN} -r "${remote}" -l "${local_ep}" -key "${key}" -crypt aes-128 -mode "${mode}" -mtu 1350 -sndwnd ${sw} -rcvwnd ${rw} -datashard ${ds} -parityshard ${ps} -dscp 46 -nocomp
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
@@ -614,6 +692,8 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
+  mv -f "$tmp" "$KCP_CLI_UNIT" || { rm -f "$tmp"; die "jaye gozini-e unit shekast khord."; }
+  chmod 644 "$KCP_CLI_UNIT" 2>/dev/null || true
 }
 
 # profile FEC ("datashard parityshard mode sndwnd rcvwnd") dar common.sh:kcp_profile ast —
@@ -633,14 +713,14 @@ cmd_kcp(){
 cmd_kcp_on(){
   local remote="${1:-}" key="${2:-}" profile="${3:-balanced}" local_ep="${KCP_LOCAL:-$KCP_LOCAL_DEF}" params ds ps mode sw rw
   [ -n "$remote" ] && [ -n "$key" ] || die "estefade: ratholenode kcp on <iran_ip:udp_port> <key> [profile]"
-  echo "$remote" | grep -qE '^[^:]+:[0-9]+$' || die "adres bayad be shkl IP:PORT bashad."
-  is_valid_port "${remote##*:}" || die "port-e remote namotabar (${remote##*:}). bayad adadi bein-e 1 ta 65535 bashad."
+  validate_endpoint "$remote" || die "adres bayad be shkl IP:PORT bashad: $remote"
+  validate_kcp_key "$key" || die "kcp key namotabar ast."
   params="$(kcp_profile "$profile")" || die "profile namotabar: $profile (balanced|lossy|aggressive)"
   read -r ds ps mode sw rw <<<"$params"
   install_kcptun_client
   gen_kcp_client_unit "$remote" "$local_ep" "$key" "$ds" "$ps" "$mode" "$sw" "$rw"
-  systemctl daemon-reload
-  systemctl enable rathole-kcp-client >/dev/null 2>&1
+  systemctl daemon-reload || return 1
+  systemctl enable rathole-kcp-client >/dev/null 2>&1 || return 1
   systemctl restart rathole-kcp-client 2>/dev/null
   if systemctl is-active --quiet rathole-kcp-client; then
     log "kcp-client faal shod: $local_ep → UDP $remote (profile: $profile)."
@@ -925,10 +1005,16 @@ cmd_fakeweb(){
   local action="${1:-}" port="${2:-8081}"
   case "$action" in
     start)
+      is_valid_port "$port" || die "port namotabar ($port)"
       command -v python3 >/dev/null 2>&1 || die "python3 nasb nist (apt install -y python3)."
       mkdir -p /var/www/rathole-fake
       rth_write_fakeweb_html /var/www/rathole-fake
-      cat > /etc/systemd/system/${FAKEWEB_SVC}.service <<UNIT
+      local unit_file="/etc/systemd/system/${FAKEWEB_SVC}.service"
+      local udir; udir="$(dirname "$unit_file")"
+      mkdir -p "$udir"
+      local tmp; tmp="$(mktemp "$udir/.fakeweb.XXXXXX" 2>/dev/null || mktemp)"
+      chmod 644 "$tmp" 2>/dev/null || true
+      cat > "$tmp" <<UNIT
 [Unit]
 Description=rathole fake web (TLS fallback)
 After=network.target
@@ -941,7 +1027,9 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 UNIT
-      systemctl daemon-reload
+      mv -f "$tmp" "$unit_file" || { rm -f "$tmp"; die "jaye gozini-e unit fakeweb shekast khord."; }
+      chmod 644 "$unit_file" 2>/dev/null || true
+      systemctl daemon-reload || die "daemon-reload shekast khord."
       if systemctl enable --now ${FAKEWEB_SVC} 2>/dev/null && systemctl is-active --quiet ${FAKEWEB_SVC}; then
         log "web fik rooye 127.0.0.1:${port} bala amad (baraye fallback inbound)."
       else
@@ -971,15 +1059,19 @@ cmd_check(){
 }
 
 # ---------- chnd upstream (atsal node be chnd server Iran) ----------
-UP_DIR="/etc/rathole/upstreams"
-up_env(){ echo "$UP_DIR/$1.env"; }
-up_svc(){ echo "$UP_DIR/$1.svc"; }
-up_toml(){ echo "/etc/rathole/client-$1.toml"; }
+UP_DIR="${UP_DIR:-/etc/rathole/upstreams}"
+up_env(){ is_valid_upstream_id "$1" || die "id namotabar baraye path ($1)"; echo "$UP_DIR/$1.env"; }
+up_svc(){ is_valid_upstream_id "$1" || die "id namotabar baraye path ($1)"; echo "$UP_DIR/$1.svc"; }
+up_toml(){ is_valid_upstream_id "$1" || die "id namotabar baraye path ($1)"; echo "${UP_TOML_DIR:-/etc/rathole}/client-$1.toml"; }
 
 ensure_client_template(){
-  local f=/etc/systemd/system/rathole-client@.service
+  local f="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/rathole-client@.service"
   [ -f "$f" ] && return 0
-  cat > "$f" <<'UNIT'
+  local udir; udir="$(dirname "$f")"
+  mkdir -p "$udir"
+  local tmp; tmp="$(mktemp "$udir/.tmpl_unit.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 644 "$tmp" 2>/dev/null || true
+  cat > "$tmp" <<'UNIT'
 [Unit]
 Description=rathole client (upstream %i)
 After=network.target
@@ -995,15 +1087,33 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+  chmod 644 "$f" 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
 }
 
 gen_up_client(){
   local id="$1"
+  is_valid_upstream_id "$id" || die "id namotabar: $id"
   [ -f "$(up_env "$id")" ] || die "upstream '$id' vojood nadarad."
-  local SERVER HOST TUNNEL KCP_LOCAL KCP_REMOTE KCP_PROFILE PLAIN_REMOTE NOISE_REMOTE NOISE_PUBKEY NOISE_PATTERN toml
-  unset SERVER HOST TUNNEL KCP_LOCAL KCP_REMOTE KCP_PROFILE PLAIN_REMOTE NOISE_REMOTE NOISE_PUBKEY NOISE_PATTERN
-  set -a; . "$(up_env "$id")"; set +a
+  local SERVER="" HOST="" TUNNEL="" KCP_LOCAL="" KCP_REMOTE="" KCP_PROFILE="" PLAIN_REMOTE="" NOISE_REMOTE="" NOISE_PUBKEY="" NOISE_PATTERN="" HEARTBEAT_TIMEOUT="" KCP_HEARTBEAT_TIMEOUT="" toml
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="$(echo "$k" | tr -d '\r\n ')"
+    case "$k" in
+      SERVER) SERVER="$v" ;;
+      HOST) HOST="$v" ;;
+      TUNNEL) TUNNEL="$v" ;;
+      KCP_LOCAL) KCP_LOCAL="$v" ;;
+      KCP_REMOTE) KCP_REMOTE="$v" ;;
+      KCP_PROFILE) KCP_PROFILE="$v" ;;
+      PLAIN_REMOTE) PLAIN_REMOTE="$v" ;;
+      NOISE_REMOTE) NOISE_REMOTE="$v" ;;
+      NOISE_PUBKEY) NOISE_PUBKEY="$v" ;;
+      NOISE_PATTERN) NOISE_PATTERN="$v" ;;
+      HEARTBEAT_TIMEOUT) HEARTBEAT_TIMEOUT="$v" ;;
+      KCP_HEARTBEAT_TIMEOUT) KCP_HEARTBEAT_TIMEOUT="$v" ;;
+    esac
+  done < "$(up_env "$id")"
   HOST="${HOST:-${SERVER%%:*}}"
   toml="$(up_toml "$id")"
   local mode="${TUNNEL:-ws}" remote tls
@@ -1079,18 +1189,27 @@ pick_kcp_local(){
   echo "127.0.0.1:$p"
 }
 
-up_kcp_unit(){ echo "/etc/systemd/system/rathole-kcp-up-$1.service"; }
+up_kcp_unit(){ is_valid_upstream_id "$1" || die "id namotabar baraye path ($1)"; echo "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/rathole-kcp-up-$1.service"; }
 
 gen_up_kcp_unit(){ # $1=id $2=remote $3=local $4=key $5=ds $6=ps $7=mode $8=sw $9=rw
   local id="$1" remote="$2" local_ep="$3" key="$4" ds="$5" ps="$6" mode="$7" sw="$8" rw="$9"
-  cat > "$(up_kcp_unit "$id")" <<UNIT
+  is_valid_upstream_id "$id" || die "id namotabar: $id"
+  validate_endpoint "$remote" || die "remote endpoint namotabar: $remote"
+  validate_endpoint "$local_ep" || die "local endpoint namotabar: $local_ep"
+  validate_kcp_key "$key" || die "kcp key namotabar"
+  local unit; unit="$(up_kcp_unit "$id")"
+  local udir; udir="$(dirname "$unit")"
+  mkdir -p "$udir"
+  local tmp; tmp="$(mktemp "$udir/.up_kcp.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 644 "$tmp" 2>/dev/null || true
+  cat > "$tmp" <<UNIT
 [Unit]
 Description=rathole kcp-client upstream ${id} (local TCP -> UDP+FEC)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${KCP_CLI_BIN} -r ${remote} -l ${local_ep} -key ${key} -crypt aes-128 -mode ${mode} -mtu 1350 -sndwnd ${sw} -rcvwnd ${rw} -datashard ${ds} -parityshard ${ps} -dscp 46 -nocomp
+ExecStart=${KCP_CLI_BIN} -r "${remote}" -l "${local_ep}" -key "${key}" -crypt aes-128 -mode "${mode}" -mtu 1350 -sndwnd ${sw} -rcvwnd ${rw} -datashard ${ds} -parityshard ${ps} -dscp 46 -nocomp
 Restart=always
 RestartSec=2
 LimitNOFILE=1048576
@@ -1098,12 +1217,16 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
+  mv -f "$tmp" "$unit" || { rm -f "$tmp"; die "jaye gozini-e unit shekast khord."; }
+  chmod 644 "$unit" 2>/dev/null || true
 }
 
 up_kcp_on(){ # $1=id $2=remote $3=key [profile]
   local id="$1" remote="$2" key="$3" profile="${4:-balanced}" params ds ps mode sw rw local_ep
+  is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
   [ -n "$remote" ] && [ -n "$key" ] || die "estefade: ratholenode upstream kcp <id> on <iran_ip:udp_port> <key> [profile]"
-  echo "$remote" | grep -qE '^[^:]+:[0-9]+$' || die "adres bayad IP:PORT bashad."
+  validate_endpoint "$remote" || die "adres bayad IP:PORT bashad: $remote"
+  validate_kcp_key "$key" || die "kcp key namotabar ast."
   params="$(kcp_profile "$profile")" || die "profile namotabar: $profile (balanced|lossy|aggressive)"
   read -r ds ps mode sw rw <<<"$params"
   # port lvkal mojood ra ngh dar, vagarna iki azad begir
@@ -1244,20 +1367,29 @@ cmd_upstream(){
     add)
       local id="${1:-}" server="${2:-}" host="${3:-}"
       [ -n "$id" ] && [ -n "$server" ] || die "estefade: ratholenode upstream add <id> <server:port> [hostname]"
-      echo "$id" | grep -qE '^[a-zA-Z0-9_-]+$' || die "id namotabar."
-      [ "$id" = "main" ] && die "id 'main' reserve ast (tunnel asli)."
-      host="${host:-${server%%:*}}"
-      printf 'SERVER=%s\nHOST=%s\n' "$server" "$host" > "$(up_env "$id")"
+      is_valid_upstream_id "$id" || die "id namotabar."
+      validate_endpoint "$server" || die "server namotabar (bayad host:port bashad)."
+      if [ -n "$host" ]; then
+        validate_hostname "$host" || die "hostname namotabar."
+      else
+        host="${server%%:*}"
+      fi
+      [ -f "$(up_env "$id")" ] && die "upstream '$id' ghablan vojood darad."
+      local tmp; tmp="$(mktemp "$UP_DIR/.env.XXXXXX" 2>/dev/null || mktemp)"
+      chmod 600 "$tmp" 2>/dev/null || true
+      printf 'SERVER=%s\nHOST=%s\nTUNNEL=ws\n' "$server" "$host" > "$tmp"
+      mv -f "$tmp" "$(up_env "$id")"
       touch "$(up_svc "$id")"; chmod 600 "$(up_env "$id")" "$(up_svc "$id")"
       log "upstream '$id' → $server ezafe shod. hala: ratholenode upstream add-svc $id <name> <token> <inbound>"
       ;;
     add-svc)
       local id="${1:-}" name="${2:-}" token="${3:-}" inbound="${4:-}"
-      [ -n "$id" ] && [ -n "$name" ] && [ -n "$token" ] && [ -n "$inbound" ] || die "estefade: ratholenode upstream add-svc <id> <name> <token> <inbound>"
+      is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
+      [ -n "$name" ] && [ -n "$token" ] && [ -n "$inbound" ] || die "estefade: ratholenode upstream add-svc <id> <name> <token> <inbound>"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist (aval: ratholenode upstream add $id <server>)."
       valid_svc_name "$name" || die "name namotabar (faghat harf/adad/khttirh)."
       valid_svc_token "$token" || die "token namotabar (faghat [A-Za-z0-9._=+/-] mjaz ast)."
-      echo "$inbound" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      is_valid_port "$inbound" || die "port bayad adad bein 1 ta 65535 bashad: $inbound"
       check_port_conflict "$inbound" "upstream '$id' service '$name'" || die "tadakhol port — meghdar digari entekhab kon."
       safe_svc_del "$(up_svc "$id")" "$name"
       echo "${name}|${token}|${inbound}" >> "$(up_svc "$id")"
@@ -1266,13 +1398,14 @@ cmd_upstream(){
       ;;
     rm-svc)
       local id="${1:-}" name="${2:-}"
-      [ -n "$id" ] && [ -n "$name" ] || die "estefade: ratholenode upstream rm-svc <id> <name>"
+      is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
+      [ -n "$name" ] || die "estefade: ratholenode upstream rm-svc <id> <name>"
       valid_svc_name "$name" || die "name namotabar."
       safe_svc_del "$(up_svc "$id")" "$name"
       up_apply "$id"; log "service '$name' az upstream '$id' hazf shod."
       ;;
     rm)
-      local id="${1:-}"; [ -n "$id" ] || die "estefade: ratholenode upstream rm <id>"
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
       systemctl disable --now "rathole-client@${id}" 2>/dev/null || true
       systemctl disable --now "rathole-kcp-up-${id}" 2>/dev/null || true
       rm -f "$(up_kcp_unit "$id")"; systemctl daemon-reload 2>/dev/null || true
@@ -1280,15 +1413,15 @@ cmd_upstream(){
       log "upstream '$id' hazf shod."
       ;;
     apply)
-      local id="${1:-}"; [ -n "$id" ] || die "estefade: ratholenode upstream apply <id>"
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
       up_apply "$id" ;;
     restart)
-      local id="${1:-}"; [ -n "$id" ] || die "estefade: ratholenode upstream restart <id>"
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
       up_restart "$id" ;;
     kcp)
-      local id="${1:-}"; shift || true
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
+      shift || true
       local act="${1:-status}"; shift || true
-      [ -n "$id" ] || die "estefade: ratholenode upstream kcp <id> <on <ip:port> <key> [profile]|off|status>"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist (aval: ratholenode upstream add $id <server>)."
       case "$act" in
         on)     up_kcp_on "$id" "${1:-}" "${2:-}" "${3:-}" ;;
@@ -1297,9 +1430,9 @@ cmd_upstream(){
         *) die "estefade: ratholenode upstream kcp <id> <on <ip:port> <key> [profile]|off|status>" ;;
       esac ;;
     plain)
-      local id="${1:-}"; shift || true
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
+      shift || true
       local act="${1:-status}"; shift || true
-      [ -n "$id" ] || die "estefade: ratholenode upstream plain <id> <on <host:port>|off|status>"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist (aval: ratholenode upstream add $id <server>)."
       case "$act" in
         on)     up_plain_on "$id" "${1:-}" ;;
@@ -1308,9 +1441,9 @@ cmd_upstream(){
         *) die "estefade: ratholenode upstream plain <id> <on <host:port>|off|status>" ;;
       esac ;;
     noise)
-      local id="${1:-}"; shift || true
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
+      shift || true
       local act="${1:-status}"; shift || true
-      [ -n "$id" ] || die "estefade: ratholenode upstream noise <id> <on <host:port> <pubkey> [pattern]|off|status>"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist (aval: ratholenode upstream add $id <server>)."
       case "$act" in
         on)     up_noise_on "$id" "${1:-}" "${2:-}" "${3:-}" ;;
@@ -1319,15 +1452,15 @@ cmd_upstream(){
         *) die "estefade: ratholenode upstream noise <id> <on <host:port> <pubkey> [pattern]|off|status>" ;;
       esac ;;
     ws)
-      local id="${1:-}"; [ -n "$id" ] || die "estefade: ratholenode upstream ws <id>"
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist."
       up_ws_on "$id" ;;
     status)
-      local id="${1:-}"; [ -n "$id" ] || die "estefade: ratholenode upstream status <id>"
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist."
       up_kcp_status "$id" ;;
     logs)
-      local id="${1:-}"; [ -n "$id" ] || die "estefade: ratholenode upstream logs <id> [n]"
+      local id="${1:-}"; is_valid_upstream_id "$id" || die "id upstream namotabar ast: $id"
       [ -f "$(up_env "$id")" ] || die "upstream '$id' nist."
       up_logs "$id" "${2:-40}" ;;
     ls)
@@ -1365,8 +1498,19 @@ cmd_watchdog(){
 wd_on(){
   local interval="${1:-60}"
   echo "$interval" | grep -qE '^[0-9]+$' || die "baze bayad adad (sanie) bashad."
-  printf 'INTERVAL=%s\nWD_WINDOW=%s\nWD_FAILS=%s\n' "$interval" "${WD_WINDOW:-75}" "${WD_FAILS:-8}" > "$WD_ENV"
-  cat > "$WD_SVC" <<UNIT
+  local edir; edir="$(dirname "$WD_ENV")"
+  mkdir -p "$edir"
+  local etmp; etmp="$(mktemp "$edir/.wd_env.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 600 "$etmp" 2>/dev/null || true
+  printf 'INTERVAL=%s\nWD_WINDOW=%s\nWD_FAILS=%s\n' "$interval" "${WD_WINDOW:-75}" "${WD_FAILS:-8}" > "$etmp"
+  mv -f "$etmp" "$WD_ENV" || { rm -f "$etmp"; die "zakhire-ye watchdog.env shekast khord."; }
+  chmod 600 "$WD_ENV" 2>/dev/null || true
+
+  local udir; udir="$(dirname "$WD_SVC")"
+  mkdir -p "$udir"
+  local stmp; stmp="$(mktemp "$udir/.wd_svc.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 644 "$stmp" 2>/dev/null || true
+  cat > "$stmp" <<UNIT
 [Unit]
 Description=rathole watchdog (auto-restart stuck tunnels)
 After=network.target
@@ -1376,7 +1520,12 @@ Type=oneshot
 EnvironmentFile=-$WD_ENV
 ExecStart=/usr/local/bin/ratholenode watchdog run
 UNIT
-  cat > "$WD_TIMER" <<UNIT
+  mv -f "$stmp" "$WD_SVC" || { rm -f "$stmp"; die "zakhire-ye watchdog.service shekast khord."; }
+  chmod 644 "$WD_SVC" 2>/dev/null || true
+
+  local ttmp; ttmp="$(mktemp "$udir/.wd_tmr.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 644 "$ttmp" 2>/dev/null || true
+  cat > "$ttmp" <<UNIT
 [Unit]
 Description=rathole watchdog timer
 
@@ -1388,7 +1537,10 @@ AccuracySec=5s
 [Install]
 WantedBy=timers.target
 UNIT
-  systemctl daemon-reload
+  mv -f "$ttmp" "$WD_TIMER" || { rm -f "$ttmp"; die "zakhire-ye watchdog.timer shekast khord."; }
+  chmod 644 "$WD_TIMER" 2>/dev/null || true
+
+  systemctl daemon-reload || return 1
   if systemctl enable --now rathole-watchdog.timer 2>/dev/null && systemctl is-active --quiet rathole-watchdog.timer; then
     log "watchdog roshan shod (har ${interval}s check mikonad va tunnel gir-karde ra restart mikonad)."
   else
@@ -1850,23 +2002,37 @@ cmd_adaptive(){
         --recoveries) recoveries="$2"; shift 2;;
         *) shift;;
       esac; done
-      echo "$interval" | grep -qE '^[0-9]+$' || die "interval bayad adad bashad."
-      echo "$failures" | grep -qE '^[0-9]+$' || die "failures bayad adad bashad."
-      echo "$recoveries" | grep -qE '^[0-9]+$' || die "recoveries bayad adad bashad."
-      mkdir -p "$(dirname "$ADAPTIVE_ENV")"
+      [[ "$interval" =~ ^[0-9]+$ ]] || die "interval bayad adad bashad."
+      [[ "$failures" =~ ^[0-9]+$ ]] || die "failures bayad adad bashad."
+      [[ "$recoveries" =~ ^[0-9]+$ ]] || die "recoveries bayad adad bashad."
+      local edir; edir="$(dirname "$ADAPTIVE_ENV")"
+      mkdir -p "$edir"
+      local etmp; etmp="$(mktemp "$edir/.adaptive_env.XXXXXX" 2>/dev/null || mktemp)"
+      chmod 600 "$etmp" 2>/dev/null || true
       printf 'ADAPTIVE_ENABLED=1\nADAPTIVE_INTERVAL=%s\nADAPTIVE_FAILURES=%s\nADAPTIVE_RECOVERIES=%s\nADAPTIVE_COOLDOWN=300\nALLOW_INSECURE=0\n' \
-        "$interval" "$failures" "$recoveries" > "$ADAPTIVE_ENV"
-      chmod 600 "$ADAPTIVE_ENV"
+        "$interval" "$failures" "$recoveries" > "$etmp"
+      mv -f "$etmp" "$ADAPTIVE_ENV" || { rm -f "$etmp"; die "zakhire-ye adaptive.env shekast khord."; }
+      chmod 600 "$ADAPTIVE_ENV" 2>/dev/null || true
+
       # systemd timer (agar mojood bashad)
       if command -v systemctl >/dev/null 2>&1; then
-        cat > /etc/systemd/system/rathole-adaptive.service <<UNIT
+        local udir="/etc/systemd/system"
+        mkdir -p "$udir"
+        local stmp; stmp="$(mktemp "$udir/.adaptive_svc.XXXXXX" 2>/dev/null || mktemp)"
+        chmod 644 "$stmp" 2>/dev/null || true
+        cat > "$stmp" <<UNIT
 [Unit]
 Description=rathole adaptive carrier probe
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/ratholenode adaptive run
 UNIT
-        cat > /etc/systemd/system/rathole-adaptive.timer <<TIMER
+        mv -f "$stmp" "$udir/rathole-adaptive.service" || { rm -f "$stmp"; die "zakhire-ye adaptive.service shekast khord."; }
+        chmod 644 "$udir/rathole-adaptive.service" 2>/dev/null || true
+
+        local ttmp; ttmp="$(mktemp "$udir/.adaptive_tmr.XXXXXX" 2>/dev/null || mktemp)"
+        chmod 644 "$ttmp" 2>/dev/null || true
+        cat > "$ttmp" <<TIMER
 [Unit]
 Description=rathole adaptive probe timer
 [Timer]
@@ -1876,7 +2042,10 @@ RandomizedDelaySec=5s
 [Install]
 WantedBy=timers.target
 TIMER
-        systemctl daemon-reload 2>/dev/null || true
+        mv -f "$ttmp" "$udir/rathole-adaptive.timer" || { rm -f "$ttmp"; die "zakhire-ye adaptive.timer shekast khord."; }
+        chmod 644 "$udir/rathole-adaptive.timer" 2>/dev/null || true
+
+        systemctl daemon-reload || return 1
         if ! (systemctl enable --now rathole-adaptive.timer 2>/dev/null && systemctl is-active --quiet rathole-adaptive.timer); then
           err "enable/start rathole-adaptive.timer shekast khord; log: journalctl -u rathole-adaptive.timer -n 30 --no-pager"
           return 1
@@ -2034,17 +2203,69 @@ main(){
 }
 
 # ---------- ghofl-e state (hamsan-e ratholectl) ----------
-# CHERA: hub mitavanad chand action ra HAMZAMAN rooye yek node ejra konad. mutator-haye
-# node (env_set / kv_set / services.conf / up_*.env) hameh alghoye khandan→neveshtan darand
-# va bedoon-e ghofl hamdigar ra bazneveshte mikonand (lost update). rooye Iran hamin bug
-# ba 4 'add'-e hamzaman 2 node ra gom kard va do port-e yeksan sakht.
-# fallback-e mkdir baraye sistem-haye bedoon-e flock (hamsan-e rth_commit_config).
-RTH_LOCK="${RTH_LOCK:-/run/ratholenode.lock}"
+_rth_init_lock_path() {
+  local default_lock="$1"
+  if [ "${RATHOLE_TEST_MODE:-0}" = "1" ]; then
+    if [ -z "${RTH_TEST_DIR:-}" ]; then
+      err "RATHOLE_TEST_MODE=1 ast vali RTH_TEST_DIR tanzim nashodeh ast."
+      return 1
+    fi
+    if [ -n "${RTH_LOCK:-}" ]; then
+      case "$RTH_LOCK" in
+        "${RTH_TEST_DIR}"* )
+          if [[ "$RTH_LOCK" == *".."* ]]; then
+            err "RTH_LOCK nabayad shamel .. bashad: $RTH_LOCK"
+            return 1
+          fi
+          ;;
+        * )
+          err "RTH_LOCK dar test mode bayad zir-e RTH_TEST_DIR ($RTH_TEST_DIR) bashad: $RTH_LOCK"
+          return 1
+          ;;
+      esac
+    else
+      RTH_LOCK="${RTH_TEST_DIR}/$(basename "$default_lock")"
+    fi
+  else
+    if [ -n "${RTH_LOCK:-}" ]; then
+      err "RTH_LOCK az mohit dar halat-e production ghabool nist (fail-closed): $RTH_LOCK"
+      return 1
+    fi
+    RTH_LOCK="$default_lock"
+  fi
+  return 0
+}
+
 rth_with_lock(){
+  if ! _rth_init_lock_path "/run/ratholenode.lock"; then
+    return 1
+  fi
+
   local lockdir; lockdir="$(dirname "$RTH_LOCK")"
+  if [ -L "$lockdir" ]; then
+    err "directory-e ghofl yek symlink ast: $lockdir (fail-closed)."
+    return 1
+  fi
+  if [ -L "$RTH_LOCK" ]; then
+    err "file-e ghofl yek symlink ast: $RTH_LOCK (fail-closed)."
+    return 1
+  fi
+  if [ -d "$RTH_LOCK" ]; then
+    err "file-e ghofl yek directory ast: $RTH_LOCK (fail-closed)."
+    return 1
+  fi
+  if [ -e "$RTH_LOCK" ] && [ ! -f "$RTH_LOCK" ]; then
+    err "file-e ghofl yek file-e adi nist: $RTH_LOCK (fail-closed)."
+    return 1
+  fi
+
   if ! mkdir -p "$lockdir" 2>/dev/null && [ ! -d "$lockdir" ]; then
     local uid; uid="$(id -u 2>/dev/null || echo 0)"
     local udir="${TMPDIR:-/tmp}/rth-run-${uid}"
+    if [ -L "$udir" ]; then
+      err "directory-e ghofl-e fallback yek symlink ast: $udir (fail-closed)."
+      return 1
+    fi
     mkdir -m 700 -p "$udir" 2>/dev/null || true
     if [ -d "$udir" ] && [ -O "$udir" ] && [ ! -L "$udir" ]; then
       RTH_LOCK="${udir}/ratholenode.lock"
@@ -2062,9 +2283,15 @@ rth_with_lock(){
   esac
 
   if command -v flock >/dev/null 2>&1; then
-    # BEHRANI: agar baz kardan fd 9 shekast bokhorad, bayad FAIL-CLOSED konad, na inke "$@" bedoon ghofl ejra shavad!
-    if ! { exec 9>"$RTH_LOCK"; } 2>/dev/null; then
+    # BEHRANI: baz kardan fd 9 ba >> (append) baraye jelogiri az truncate shodan-e file.
+    # agar baz kardan fd 9 shekast bokhorad, bayad FAIL-CLOSED konad.
+    if ! { exec 9>>"$RTH_LOCK"; } 2>/dev/null; then
       err "baz kardan-e file-e ghofl shekast khord: $RTH_LOCK; amaliat baraye jelogiri az race condition motavaghef shod."
+      return 1
+    fi
+    if [ -L "$RTH_LOCK" ]; then
+      err "file-e ghofl pas az baz kardan symlink tashkhis dadeh shod: $RTH_LOCK (fail-closed)."
+      exec 9>&-
       return 1
     fi
     if ! flock -w "$timeout_sec" 9; then
