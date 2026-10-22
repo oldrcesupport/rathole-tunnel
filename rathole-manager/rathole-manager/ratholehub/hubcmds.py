@@ -41,6 +41,25 @@ RE_BH_TOK  = re.compile(r"^[A-Fa-f0-9]{16,64}\Z")   # token-e moshtarak-e backha
 RE_UPSTREAM = re.compile(r"^https?://[A-Za-z0-9._-]{1,255}:[0-9]{1,5}\Z")
 RE_LINES    = re.compile(r"^[0-9]{1,4}\Z")   # tedad-e khat-e log (hadaksar 9999)
 
+def is_valid_port(val):
+    if val is None:
+        return False
+    s = str(val).strip()
+    if not s.isdigit() or not RE_PORT.match(s):
+        return False
+    p = int(s)
+    return 1 <= p <= 65535
+
+def is_valid_endpoint(val):
+    if not val or not isinstance(val, str):
+        return False
+    if not RE_IPPORT.match(val):
+        return False
+    parts = val.split(":")
+    if len(parts) != 2:
+        return False
+    return is_valid_port(parts[1])
+
 
 # ---------- defense-in-depth: har dastoor-e tashkhisi ba `timeout` pichide mishavad ----------
 # CHERA: vaghti SSH samt-e hub timeout mishavad، subprocess-e mahalli koshte mishavad AMMA
@@ -68,7 +87,7 @@ def build_iran_cmd(action, a):
         port = str(a.get("port", "") or "")
         cmd = ["ratholectl", "fakeweb", "start"]
         if port:
-            if not RE_PORT.match(port): return None
+            if not is_valid_port(port): return None
             cmd.append(port)
         return cmd
     if action == "fakeweb_stop":   return ["ratholectl", "fakeweb", "stop"]
@@ -133,7 +152,7 @@ def build_iran_cmd(action, a):
     if action == "kcp_show":   return ["ratholectl", "kcp", "show"]
     if action == "kcp_on":
         port = a.get("port", "443"); profile = a.get("profile", "balanced")
-        if not RE_PORT.match(str(port)) or not RE_PROFILE.match(str(profile)): return None
+        if not is_valid_port(str(port)) or not RE_PROFILE.match(str(profile)): return None
         return ["ratholectl", "kcp", "on", str(port), str(profile)]
     # ---- plain: tunnel-e websocket bedoon-e TLS (listener HTTP rooye port jda) ----
     if action == "plain_status": return ["ratholectl", "plain", "status"]
@@ -141,7 +160,7 @@ def build_iran_cmd(action, a):
     if action == "plain_off":    return ["ratholectl", "plain", "off"]
     if action == "plain_on":
         port = str(a.get("port", "8880") or "8880")
-        if not RE_PORT.match(port): return None
+        if not is_valid_port(port): return None
         return ["ratholectl", "plain", "on", port]
     # ---- direct-IP: masiryabi ba header rooye port-e sade (bedoon TLS/auth) ----
     if action == "direct_status": return ["ratholectl", "direct", "status"]
@@ -150,7 +169,7 @@ def build_iran_cmd(action, a):
     if action == "direct_on":
         port   = str(a.get("port", "8081") or "8081")
         header = str(a.get("header", "X-Cdn-Id") or "X-Cdn-Id")
-        if not RE_PORT.match(port):     return None
+        if not is_valid_port(port):     return None
         if not RE_HEADER.match(header): return None
         return ["ratholectl", "direct", "on", "--port", port, "--header", header]
     # ---- noise: tunnel-e ramznegari-shode (Noise) rooye instans-e dovom ----
@@ -159,7 +178,7 @@ def build_iran_cmd(action, a):
     if action == "noise_off":    return ["ratholectl", "noise", "off"]
     if action == "noise_on":
         port = str(a.get("port", "2334") or "2334")
-        if not RE_PORT.match(port): return None
+        if not is_valid_port(port): return None
         return ["ratholectl", "noise", "on", port]
     if action in ("noise_node_on", "noise_node_off"):
         name = a.get("name", "")
@@ -178,7 +197,7 @@ def build_iran_cmd(action, a):
         # transport be mode vabaste ast: dar nginx_tls، nginx TLS ra terminate mikonad pas server
         # HATMAN bedoon-e TLS ast (ws/wsmux). dar direct_ip nginx dar masir nist، pas khod-e
         # backhaul mitavanad TLS ra terminate konad (wss/wssmux ba gvahi-ye ip-cert).
-        if not RE_PORT.match(port):        return None
+        if not is_valid_port(port):        return None
         if not RE_PROFILE.match(profile):  return None
         if not RE_BH_MODE.match(mode):     return None
         if mode == "direct_ip":
@@ -213,7 +232,7 @@ def build_iran_cmd(action, a):
         return ["ratholectl", "game", "show", name]
     if action == "game_add":
         name = a.get("name", ""); inbound = str(a.get("inbound", "")); sni = a.get("sni", "")
-        if not RE_NAME.match(name) or not RE_PORT.match(inbound) or not RE_HOST.match(sni): return None
+        if not RE_NAME.match(name) or not is_valid_port(inbound) or not RE_HOST.match(sni): return None
         return ["ratholectl", "game", "add", name, inbound, sni]
     if action == "game_rm":
         name = a.get("name", "")
@@ -226,10 +245,10 @@ def build_iran_cmd(action, a):
     # ---- mdirit node aadi ----
     if action == "add_node":
         name = a.get("name", ""); inbound = str(a.get("inbound", "")); api = str(a.get("api_port", "") or "")
-        if not RE_NAME.match(name) or not RE_PORT.match(inbound): return None
+        if not RE_NAME.match(name) or not is_valid_port(inbound): return None
         cmd = ["ratholectl", "add", name, inbound]
         if api:
-            if not RE_PORT.match(api): return None
+            if not is_valid_port(api): return None
             cmd += ["--api-port", api]
         return cmd
     if action == "rm_node":
@@ -246,11 +265,11 @@ def build_iran_cmd(action, a):
         cmd = ["ratholectl", "edit", name]
         inbound = str(a.get("inbound", "") or "")
         if inbound:
-            if not RE_PORT.match(inbound): return None
+            if not is_valid_port(inbound): return None
             cmd += ["--inbound", inbound]
         api = str(a.get("api_port", "") or "")
         if api:
-            if api != "off" and not RE_PORT.match(api): return None
+            if api != "off" and not is_valid_port(api): return None
             cmd += ["--api-port", api]
         if len(cmd) == 3: return None  # hich tghiiri dade nashode
         return cmd
@@ -268,7 +287,7 @@ def build_iran_cmd(action, a):
                        "fake-port", "sub-port", "control-port",
                        "sub-path", "hub-path"): return None
         if key in ("fake-port", "sub-port", "control-port"):
-            if not RE_PORT.match(val): return None
+            if not is_valid_port(val): return None
         elif key in ("sub-path", "hub-path"):
             # faghat yek segment-e sade (mesl 'subs' ya '/subs'); slash-haye atraf
             # ghabl az ersal bardashte mishavand. segment-e rezerv niz dar ratholectl
@@ -309,14 +328,14 @@ def build_node_cmd(action, a):
     if action == "plain_off":    return ["ratholenode", "plain", "off"]
     if action == "plain_on":
         remote = a.get("remote", "")
-        if not RE_IPPORT.match(remote): return None
+        if not is_valid_endpoint(remote): return None
         return ["ratholenode", "plain", "on", remote]
     if action == "noise_status": return ["ratholenode", "noise", "status"]
     if action == "noise_off":    return ["ratholenode", "noise", "off"]
     if action == "noise_on":
         remote = a.get("remote", "")
         pubkey = a.get("pubkey", "")
-        if not RE_IPPORT.match(remote): return None
+        if not is_valid_endpoint(remote): return None
         if not RE_B64.match(pubkey): return None
         cmd = ["ratholenode", "noise", "on", remote, pubkey]
         pattern = a.get("pattern", "")
@@ -344,7 +363,7 @@ def build_node_cmd(action, a):
         else:
             # direct-IP: endpoint bayad host:port-e sarih bashad. har chahar transport mojaz ast —
             # ws/wsmux bedoon-e ramz، wss/wssmux ba gvahi-ye self-signed-e samt-e Iran.
-            if not RE_IPPORT.match(remote): return None
+            if not is_valid_endpoint(remote): return None
             if transport not in ("ws", "wsmux", "wss", "wssmux"): return None
         return ["ratholenode", "backhaul", "on", remote, token, transport, profile]
     if action == "migrate":     return ["ratholenode", "migrate"]
@@ -353,11 +372,11 @@ def build_node_cmd(action, a):
     if action == "apply":       return ["ratholenode", "apply"]
     if action == "kcp_on":
         remote = a.get("remote", ""); key = a.get("key", ""); profile = a.get("profile", "balanced")
-        if not RE_IPPORT.match(remote) or not RE_KEY.match(key) or not RE_PROFILE.match(profile): return None
+        if not is_valid_endpoint(remote) or not RE_KEY.match(key) or not RE_PROFILE.match(profile): return None
         return ["ratholenode", "kcp", "on", remote, key, profile]
     if action == "upstream_kcp_on":
         uid = a.get("id", ""); remote = a.get("remote", ""); key = a.get("key", ""); profile = a.get("profile", "balanced")
-        if not RE_ID.match(uid) or not RE_IPPORT.match(remote) or not RE_KEY.match(key) or not RE_PROFILE.match(profile): return None
+        if not RE_ID.match(uid) or not is_valid_endpoint(remote) or not RE_KEY.match(key) or not RE_PROFILE.match(profile): return None
         return ["ratholenode", "upstream", "kcp", uid, "on", remote, key, profile]
     if action == "upstream_kcp_off":
         uid = a.get("id", "")
@@ -379,7 +398,7 @@ def build_node_cmd(action, a):
     # ---- hamel-e per-upstream: hamsan-e tunnel-e asli vali baraye har upstream joda ----
     if action == "upstream_plain_on":
         uid = a.get("id", ""); remote = a.get("remote", "")
-        if not RE_ID.match(uid) or not RE_IPPORT.match(remote): return None
+        if not RE_ID.match(uid) or not is_valid_endpoint(remote): return None
         return ["ratholenode", "upstream", "plain", uid, "on", remote]
     if action == "upstream_plain_off":
         uid = a.get("id", "")
@@ -387,7 +406,7 @@ def build_node_cmd(action, a):
         return ["ratholenode", "upstream", "plain", uid, "off"]
     if action == "upstream_noise_on":
         uid = a.get("id", ""); remote = a.get("remote", ""); pubkey = a.get("pubkey", "")
-        if not RE_ID.match(uid) or not RE_IPPORT.match(remote): return None
+        if not RE_ID.match(uid) or not is_valid_endpoint(remote): return None
         if not RE_B64.match(pubkey): return None
         cmd = ["ratholenode", "upstream", "noise", uid, "on", remote, pubkey]
         pattern = a.get("pattern", "")
@@ -418,21 +437,23 @@ def build_node_cmd(action, a):
     if action == "set_server":
         # sazgari ba UI/API ghadimi: faghat endpoint ra set kon.
         server = a.get("server", "")
-        if not (RE_IPPORT.match(server) or RE_HOST.match(server)): return None
+        if ":" not in server: server = f"{server}:443"
+        if not is_valid_endpoint(server): return None
         return ["ratholenode", "set", "SERVER", server]
     if action == "set_main":
         # endpoint-e dial + SNI/cert hostname + public trust root atomik.
         server = a.get("server", "")
+        if ":" not in server: server = f"{server}:443"
+        if not is_valid_endpoint(server): return None
         hostname = a.get("tls_hostname", "") or ""
         trusted_root = a.get("tls_trusted_root", "") or ""
-        if not (RE_IPPORT.match(server) or RE_HOST.match(server)): return None
         if hostname and not RE_HOST.match(hostname): return None
         if trusted_root and not RE_PATH.match(trusted_root): return None
         if trusted_root and not hostname: return None
         return ["ratholenode", "set-main", server, hostname, trusted_root] if trusted_root else (["ratholenode", "set-main", server, hostname] if hostname else ["ratholenode", "set-main", server])
     if action == "watchdog_on":
         iv = str(a.get("interval", "60") or "60")
-        if not RE_PORT.match(iv): return None
+        if not is_valid_port(iv): return None
         return ["ratholenode", "watchdog", "on", iv]
     if action == "watchdog_off":    return ["ratholenode", "watchdog", "off"]
     if action == "watchdog_status": return ["ratholenode", "watchdog", "status"]
@@ -440,7 +461,7 @@ def build_node_cmd(action, a):
         cmd = ["ratholenode", "fakeweb", "start"]
         port = a.get("port")
         if port:
-            if not RE_PORT.match(str(port)): return None
+            if not is_valid_port(str(port)): return None
             cmd.append(str(port))
         return cmd
     if action == "fakeweb_stop":   return ["ratholenode", "fakeweb", "stop"]
@@ -449,7 +470,7 @@ def build_node_cmd(action, a):
     # ---- mdirit service rooye node ----
     if action == "add_svc":
         name = a.get("name", ""); token = a.get("token", ""); inbound = str(a.get("inbound", ""))
-        if not RE_NAME.match(name) or not RE_KEY.match(token) or not RE_PORT.match(inbound): return None
+        if not RE_NAME.match(name) or not RE_KEY.match(token) or not is_valid_port(inbound): return None
         return ["ratholenode", "add-svc", name, token, inbound]
     if action == "rm_svc":
         name = a.get("name", "")
@@ -457,7 +478,7 @@ def build_node_cmd(action, a):
         return ["ratholenode", "rm-svc", name]
     if action == "upstream_add":
         uid = a.get("id", ""); server = a.get("server", ""); host = a.get("host", "")
-        if not RE_ID.match(uid) or not RE_IPPORT.match(server): return None
+        if not RE_ID.match(uid) or not is_valid_endpoint(server): return None
         cmd = ["ratholenode", "upstream", "add", uid, server]
         if host:
             if not RE_HOST.match(host): return None
@@ -465,7 +486,7 @@ def build_node_cmd(action, a):
         return cmd
     if action == "upstream_add_svc":
         uid = a.get("id", ""); name = a.get("name", ""); token = a.get("token", ""); inbound = str(a.get("inbound", ""))
-        if not RE_ID.match(uid) or not RE_NAME.match(name) or not RE_KEY.match(token) or not RE_PORT.match(inbound): return None
+        if not RE_ID.match(uid) or not RE_NAME.match(name) or not RE_KEY.match(token) or not is_valid_port(inbound): return None
         return ["ratholenode", "upstream", "add-svc", uid, name, token, inbound]
     if action == "upstream_rm_svc":
         uid = a.get("id", ""); name = a.get("name", "")
@@ -484,7 +505,7 @@ def build_node_cmd(action, a):
         iv = str(a.get("interval", "30") or "30")
         fa = str(a.get("failures",  "3")  or "3")
         re = str(a.get("recoveries","5")  or "5")
-        if not RE_PORT.match(iv) or not RE_PORT.match(fa) or not RE_PORT.match(re): return None
+        if not is_valid_port(iv) or not RE_PORT.match(fa) or not RE_PORT.match(re): return None
         return ["ratholenode", "adaptive", "on", "--interval", iv, "--failures", fa, "--recoveries", re]
     return None
 

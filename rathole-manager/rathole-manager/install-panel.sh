@@ -4,6 +4,7 @@
 #        shnasaii va backup kanfighai mtdakhl nginx rooye 443, va ejra-ye khodkar init.
 # ejra: sudo bash install-panel.sh
 set -euo pipefail
+umask 077
 
 RATHOLE_VERSION="${RATHOLE_VERSION:-v0.5.0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,6 +80,7 @@ fresh_reset(){
   local ts bdir p; ts="$(date +%Y%m%d-%H%M%S)"
   bdir="/var/backups/rathole-manager/fresh-reset-$ts"
   mkdir -p "$bdir"
+  chmod 700 "$bdir"
   warn "backup-e vaziat-e ghabli dar: $bdir (agar lazem shod bargardan)."
   systemctl stop rathole-server 2>/dev/null || true
   for p in /etc/rathole-manager/state.json \
@@ -158,8 +160,8 @@ find_local_rathole(){
 }
 
 install_rathole(){
-  if command -v rathole >/dev/null 2>&1; then
-    log "rathole az ghabl nasb ast: $(command -v rathole) ($(rathole --version 2>/dev/null || echo '?'))"
+  if [ -x /usr/local/bin/rathole ] && /usr/local/bin/rathole --version >/dev/null 2>&1; then
+    log "rathole az ghabl nasb ast: /usr/local/bin/rathole ($(/usr/local/bin/rathole --version 2>/dev/null || echo '?'))"
     ask_yn "dvbarh nasb/beroozresani shvd?" || return 0
   fi
 
@@ -339,7 +341,7 @@ if nginx -t; then
   systemctl reload nginx || systemctl restart nginx
   log "nginx reload shod."
 else
-  err "nginx -t khata dad; tadakhol/gvahi ra barresi kon (bkapha dar /etc/nginx/rathole-backup-* va *.rathole-orig.bak)."
+  die "nginx -t khata dad; tadakhol/gvahi ra barresi kon (bkapha dar /etc/nginx/rathole-backup-* va *.rathole-orig.bak)."
 fi
 
 # ---------- faalsazi service ----------
@@ -391,6 +393,7 @@ else
     err "hanoz start nashod. khorooji-ye vaghei-ye systemd:"
     systemctl --no-pager --full status rathole-server 2>&1 | head -12 | sed 's/^/    /' >&2 || true
     journalctl -u rathole-server -n 20 --no-pager 2>&1 | sed 's/^/    /' >&2 || true
+    die "rathole-server start nashod (exit ba khata)."
   fi
 fi
 

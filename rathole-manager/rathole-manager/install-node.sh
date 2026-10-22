@@ -9,6 +9,7 @@
 # nasb az rooye backup:
 #   sudo bash install-node.sh --restore /root/rathole-node-backup-....tar.gz
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RATHOLE_VERSION="${RATHOLE_VERSION:-v0.5.0}"
@@ -43,7 +44,18 @@ if [ -n "$RESTORE" ]; then
 elif [ -n "$SERVER" ] || [ -n "$NAME" ] || [ -n "$TOKEN" ] || [ -n "$INBOUND" ]; then
   [ -n "$SERVER" ] && [ -n "$NAME" ] && [ -n "$TOKEN" ] && [ -n "$INBOUND" ] || \
     die "argumenthaye lazem: --server --name --token --inbound-port  (ya --restore <file>)"
-  echo "$SERVER" | grep -qE '^[A-Za-z0-9_.-]+(:[0-9]{1,5})?$' || die "SERVER namotabar."
+  if [[ "$SERVER" =~ ^[A-Za-z0-9_.-]+:([0-9]+)$ ]]; then
+    p="${BASH_REMATCH[1]}"
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || die "port-e SERVER bayad beine 1 ta 65535 bashad: $p"
+  elif [[ "$SERVER" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    SERVER="${SERVER}:443"
+  else
+    die "SERVER namotabar: $SERVER"
+  fi
+  [[ "$INBOUND" =~ ^[0-9]+$ ]] && [ "$INBOUND" -ge 1 ] && [ "$INBOUND" -le 65535 ] || die "inbound port bayad beine 1 ta 65535 bashad: $INBOUND"
+  if [ -n "$API_INBOUND" ]; then
+    [[ "$API_INBOUND" =~ ^[0-9]+$ ]] && [ "$API_INBOUND" -ge 1 ] && [ "$API_INBOUND" -le 65535 ] || die "api inbound port bayad beine 1 ta 65535 bashad: $API_INBOUND"
+  fi
   [ -z "$TLS_HOSTNAME" ] || echo "$TLS_HOSTNAME" | grep -qE '^[A-Za-z0-9_.-]+$' || die "TLS hostname namotabar."
   [ -z "$TLS_TRUSTED_ROOT" ] || echo "$TLS_TRUSTED_ROOT" | grep -qE '^/[A-Za-z0-9_./-]{1,255}$' || die "TLS trusted root namotabar."
   [ -z "$TLS_TRUSTED_ROOT" ] || [ -n "$TLS_HOSTNAME" ] || die "--tls-trusted-root be --tls-hostname niaz darad."
@@ -82,7 +94,7 @@ install_rathole(){
   rm -rf "$tmp"
 }
 
-if ! command -v rathole >/dev/null 2>&1; then
+if ! [ -x /usr/local/bin/rathole ] || ! /usr/local/bin/rathole --version >/dev/null 2>&1; then
   # agar core/SHA256SUMS vojood darad, az binary-e patched-e bundle estefade kon
   if [ -f "$SCRIPT_DIR/core/SHA256SUMS" ] && [ -f "$SCRIPT_DIR/core-install.sh" ]; then
     bash "$SCRIPT_DIR/core-install.sh" 2>/dev/null || install_rathole
@@ -134,6 +146,9 @@ if [ -n "$RESTORE" ]; then
   if command -v ratholenode >/dev/null 2>&1; then
     ratholenode restore "$RESTORE"
   else
+    if tar -tzf "$RESTORE" | grep -E '(^/|\.\.)'; then
+      die "tar archive daraye masirhaye khatarnak (absolute ya ..) ast."
+    fi
     tar -xzf "$RESTORE" -C / || die "baz kardan backup shekast khord."
     systemctl enable --now rathole-client 2>/dev/null || true
   fi
@@ -174,14 +189,16 @@ if [ "$CONFIG_NOW" -eq 1 ]; then
         echo; echo "[client.services.${NAME}_api]"; echo "token = \"${API_TOKEN}\""; echo "local_addr = \"127.0.0.1:${API_INBOUND}\""; echo "type = \"tcp\""
       fi
     } > /etc/rathole/client.toml
+    chmod 600 /etc/rathole/client.toml
     systemctl enable --now rathole-client
   fi
   sleep 1
   if systemctl is-active --quiet rathole-client; then
     log "node '${NAME}' nasb va ba movafaghiat faal shod."
   else
-    warn "rathole-client start nashod ya dar halat-e khata ast. log-e service:"
+    err "rathole-client start nashod ya dar halat-e khata ast. log-e service:"
     journalctl -u rathole-client -n 15 --no-pager 2>&1 | sed 's/^/    /' >&2 || true
+    die "rathole-client start nashod (exit ba khata)."
   fi
 else
   # nasb-e sarih-e CLI bedoon argument

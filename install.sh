@@ -22,6 +22,7 @@
 # repo slug pishfarz oldrcesupport/rathole-tunnel ast؛ baraye estefade az fork-e khodet ba mtghir-e mohiti
 # override kon:   RATHOLE_GH="youruser/yourrepo" curl -fsSL .../install.sh | sudo bash -s -- ...
 set -euo pipefail
+umask 077
 
 # ---------- tanzimat ----------
 GH="${RATHOLE_GH:-oldrcesupport/rathole-tunnel}"    # owner/repo — pishfarz، ba RATHOLE_GH override kon
@@ -185,12 +186,21 @@ main(){
   fi
   log "baste daryaft shod: $(basename "$bundle")  ($(du -h "$bundle" 2>/dev/null | cut -f1))"
 
+  # 2.5) etebarsanji ba SHA256SUMS agar dar release bashad
+  if fetch "$DL/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
+    log "etebarsanji cryptographic (SHA256SUMS)..."
+    (cd "$tmp" && sha256sum -c --ignore-missing SHA256SUMS >/dev/null 2>&1) || die "Checksum verification shekast khord! File-haye daryafti dastkari shode-and."
+    log "Checksums taeed shodand (SHA256 OK)."
+  fi
+
   # 3) tahvil be bootstrap.sh (hameye argvman-haye passed be bootstrap miravand)
   # RATHOLE_RELEASE-e halshode ra export mikonim: masir-e `--update` be update.sh miresad va
   # nabayad dobare be `latest` bargardad (vagarna noskhe-ye pin-shode bi-seda avaz mishavad).
   log "ejra-ye bootstrap..."
   export RATHOLE_GH="$GH" RATHOLE_RELEASE="$REL"
-  exec bash "$tmp/bootstrap.sh" --local "$bundle" "$@"
+  bash "$tmp/bootstrap.sh" --local "$bundle" "$@"
+  local rc=$?
+  exit "$rc"
 }
 
 main "$@"

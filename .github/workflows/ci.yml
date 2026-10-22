@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, "fix/**", "feature/**" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  shell-syntax:
+    name: Shell Syntax & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Syntax check bash scripts (bash -n)
+        run: |
+          set -e
+          echo "Checking root shell scripts..."
+          for f in bootstrap.sh install.sh install-node.sh install-panel.sh; do
+            if [ -f "$f" ]; then
+              echo "Checking $f..."
+              bash -n "$f"
+            fi
+          done
+
+          echo "Checking package shell scripts and CLIs..."
+          cd rathole-manager/rathole-manager
+          for f in *.sh ratholectl ratholenode; do
+            if [ -f "$f" ]; then
+              echo "Checking $f..."
+              bash -n "$f"
+            fi
+          done
+
+  python-tests:
+    name: Python Syntax & Unit Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Syntax check Python files (py_compile)
+        run: |
+          python -m py_compile rathole-manager/rathole-manager/ratholehub/hub.py
+          python -m py_compile rathole-manager/rathole-manager/ratholehub/hubcmds.py
+          python -m py_compile tests/test_hub.py
+
+      - name: Run Python unit tests
+        run: |
+          python -m unittest discover -s tests -v
+
+  test-harness:
+    name: Rathole Manager Test Harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl openssl
+
+      - name: Run Test Harness
+        run: |
+          chmod +x rathole-manager/rathole-manager/test-harness.sh
+          chmod +x rathole-manager/rathole-manager/ratholectl
+          chmod +x rathole-manager/rathole-manager/ratholenode
+          ./rathole-manager/rathole-manager/test-harness.sh
+
+  bundle-package:
+    name: Release Packaging Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify rathole-manager directory integrity
+        run: |
+          test -d rathole-manager/rathole-manager
+          test -f rathole-manager/rathole-manager/common.sh
+          test -f rathole-manager/rathole-manager/ratholectl
+          test -f rathole-manager/rathole-manager/ratholenode
+          test -f rathole-manager/rathole-manager/install-panel.sh
+          test -f rathole-manager/rathole-manager/install-node.sh
+          test -f rathole-manager/rathole-manager/update.sh
+          test -f rathole-manager/rathole-manager/ratholehub/hub.py
+          test -f rathole-manager/rathole-manager/ratholehub/hubcmds.py

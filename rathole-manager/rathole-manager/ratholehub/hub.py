@@ -8,6 +8,11 @@
 # mtghirhai mhiti baraye tst lvkal: RATHOLEHUB_CONF, RATHOLEHUB_INV, RATHOLEHUB_MOCK=1
 import os, sys, json, hmac, hashlib, time, subprocess, re, secrets, threading, shlex, shutil
 
+# Enforce secure umask for hub process
+try:
+    os.umask(0o077)
+except Exception:
+    pass
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -50,6 +55,104 @@ def login_reset(ip):
 _INSECURE_TOKEN = "changeme"
 _INSECURE_PW_SHA = hashlib.sha256(b"admin").hexdigest()
 
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+    return f"pbkdf2:sha256:100000:{salt}:{dk.hex()}"
+
+def verify_password(password, hashed):
+    if not hashed:
+        return False, False
+    if hashed.startswith("pbkdf2:sha256:"):
+        parts = hashed.split(":")
+        if len(parts) == 5:
+            _, _, iters, salt, target_hex = parts
+            try:
+                dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(iters))
+                matches = hmac.compare_digest(dk.hex(), target_hex)
+                return matches, False
+            except Exception:
+                return False, False
+    legacy_hex = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    if hmac.compare_digest(legacy_hex, hashed):
+        return True, True
+    return False, False
+
+SAFE_SSH_OPTIONS = {
+    "batchmode", "connecttimeout", "connectionattempts",
+    "serveraliveinterval", "serveralivecountmax",
+    "stricthostkeychecking", "userknownhostsfile",
+    "tcpkeepalive", "ciphers", "macs", "kexalgorithms",
+    "hostkeyalgorithms", "pubkeyacceptedalgorithms",
+    "port", "compression",
+}
+
+FORBIDDEN_SSH_PATTERNS = re.compile(
+    r"(proxycommand|localcommand|permitlocalcommand|configfile|controlpath|controlmaster|proxyjump|remoteforward|dynamicforward|localforward)",
+    re.IGNORECASE
+)
+
+def validate_ssh_opts(opts):
+    if not isinstance(opts, list) or not all(isinstance(x, str) for x in opts):
+        return False, "ssh_opts must be a list of strings"
+    i = 0
+    while i < len(opts):
+        opt = opts[i].strip()
+        if opt == "-F":
+            return False, "Option -F (config file) is prohibited for security"
+        if opt.startswith("-o"):
+            if opt == "-o":
+                if i + 1 >= len(opts):
+                    return False, "Malformed -o flag"
+                val = opts[i + 1].strip()
+                i += 1
+            else:
+                val = opt[2:].strip()
+            if FORBIDDEN_SSH_PATTERNS.search(val):
+                return False, f"Dangerous SSH option prohibited: {FORBIDDEN_SSH_PATTERNS.search(val).group(0)}"
+            k = val.split("=")[0].strip().lower()
+            if k not in SAFE_SSH_OPTIONS:
+                return False, f"SSH option '{k}' is not in allowed safe list"
+        elif opt.startswith("-"):
+            if opt not in ("-4", "-6", "-v", "-q"):
+                return False, f"Flag '{opt}' is not permitted in ssh_opts"
+        else:
+            return False, f"Unexpected non-flag argument in ssh_opts: {opt}"
+        i += 1
+    return True, ""
+
+def redact_cmd(cmd):
+    if not cmd:
+        return ""
+    if isinstance(cmd, str):
+        words = shlex.split(cmd) if " " in cmd else [cmd]
+    elif isinstance(cmd, (list, tuple)):
+        words = [str(x) for x in cmd]
+    else:
+        words = [str(cmd)]
+
+    redacted = list(words)
+    if len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "add-svc":
+        redacted[3] = "***REDACTED***"
+    elif len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "kcp" and redacted[2] == "on":
+        redacted[4] = "***REDACTED***"
+    elif len(redacted) >= 7 and redacted[0] == "ratholenode" and redacted[1] == "upstream" and redacted[2] == "kcp" and redacted[4] == "on":
+        redacted[6] = "***REDACTED***"
+    elif len(redacted) >= 7 and redacted[0] == "ratholenode" and redacted[1] == "upstream" and redacted[2] == "add-svc":
+        redacted[5] = "***REDACTED***"
+    elif len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "backhaul" and redacted[2] == "on":
+        redacted[4] = "***REDACTED***"
+    elif len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "noise" and redacted[2] == "on":
+        redacted[4] = "***REDACTED***"
+
+    for i in range(len(redacted) - 1):
+        prev = redacted[i].lower()
+        if prev in ("--password", "--token", "--key", "-key", "-p"):
+            redacted[i + 1] = "***REDACTED***"
+
+    return " ".join(shlex.quote(w) if (" " in w or not w) else w for w in redacted)
+
 def load_json(path, default):
     """khvandn JSON. fght "nbvde file" bhsvrt default brmigrdd;
     faile khrab/ghirghablkhvandn khata midahad ta ba kanfige pishfrze naamn ejra nshvim."""
@@ -63,34 +166,52 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 def _strip_ansi(s):
     return _ANSI.sub("", s or "")
 
 def get_config():
-    cfg = load_json(CONF_PATH, {
-        "api_token": _INSECURE_TOKEN,
-        "admin_password_sha256": _INSECURE_PW_SHA,
-        "listen_host": "127.0.0.1", "listen_port": 8088,
-        "ssh_key_path": "", "ssh_opts": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                                          "-o", "StrictHostKeyChecking=accept-new"],
-        "bundle_dir": "/opt/ratholehub/bundle",
-    })
+    if not os.path.exists(CONF_PATH):
+        if not MOCK:
+            raise RuntimeError(f"Config file missing at {CONF_PATH}; default credentials prohibited in production.")
+        cfg = {
+            "api_token": _INSECURE_TOKEN,
+            "admin_password_sha256": _INSECURE_PW_SHA,
+            "listen_host": "127.0.0.1", "listen_port": 8088,
+            "ssh_key_path": "", "ssh_opts": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                                              "-o", "StrictHostKeyChecking=accept-new"],
+            "bundle_dir": "/opt/ratholehub/bundle",
+            "_insecure": True,
+        }
+        return cfg
+    cfg = load_json(CONF_PATH, {})
     cfg["_insecure"] = (cfg.get("api_token") == _INSECURE_TOKEN
                         or cfg.get("admin_password_sha256") == _INSECURE_PW_SHA)
     return cfg
 
 def get_inventory():
+    if not os.path.exists(INV_PATH):
+        return []
     inv = load_json(INV_PATH, [])
-    return inv if isinstance(inv, list) else []
+    if not isinstance(inv, list):
+        raise RuntimeError(f"Inventory file at {INV_PATH} has invalid schema (expected list, got {type(inv).__name__}).")
+    return inv
 
 def set_inventory(inv):
+    if not isinstance(inv, list):
+        raise ValueError("inventory must be a list")
     with _lock:
         save_json(INV_PATH, inv)
 
@@ -101,6 +222,8 @@ def update_inventory(mutator):
         inv = get_inventory()
         new_inv = mutator(inv)
         if new_inv is not None:
+            if not isinstance(new_inv, list):
+                raise ValueError("mutated inventory must be a list")
             save_json(INV_PATH, new_inv)
         return new_inv
 
@@ -123,18 +246,20 @@ def update_config(mutator):
         return new_cfg if new_cfg is not None else cfg
 
 def audit_log(user, server, action, cmd, rc):
-    # sbte append-only az har amliate nvshtari baraye rdgiri.
+    # sbte append-only az har amliate nvshtari baraye rdgiri (ba redaction-e secret-ha va 0600 mode).
     try:
+        redacted_cmd = redact_cmd(cmd)
         line = json.dumps({
             "ts": int(time.time()), "user": user, "server": server,
-            "action": action, "cmd": cmd, "rc": rc,
+            "action": action, "cmd": redacted_cmd, "rc": rc,
         }, ensure_ascii=False)
-        os.makedirs(os.path.dirname(AUDIT_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(AUDIT_PATH), mode=0o700, exist_ok=True)
         with _lock:
-            with open(AUDIT_PATH, "a", encoding="utf-8") as f:
+            fd = os.open(AUDIT_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with open(fd, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-    except Exception:
-        pass  # log nbaid masir asli ra bshknd
+    except Exception as e:
+        sys.stderr.write(f"[hub audit warning] {e}\n")
 
 def read_audit(limit=100):
     try:
@@ -250,7 +375,11 @@ def run_on_server(server, cmd_args, timeout=120):
         return {"rc": 1, "out": "", "err": str(e)}
 
 def _ssh_base(cfg, server):
-    ssh = ["ssh"] + list(cfg.get("ssh_opts", []))
+    raw_opts = list(cfg.get("ssh_opts", []))
+    ok, err = validate_ssh_opts(raw_opts)
+    if not ok:
+        raise ValueError(f"Invalid ssh_opts in configuration: {err}")
+    ssh = ["ssh"] + raw_opts
     if cfg.get("ssh_key_path"):
         ssh += ["-i", cfg["ssh_key_path"]]
     ssh += ["-p", str(server.get("ssh_port", 22)),
@@ -339,26 +468,49 @@ def ensure_hub_key():
     # motmaen mishavad hub yek jft-kelid SSH darad; agar nabashad misazad va masir ra dar config zakhire mikonad.
     cfg = get_config()
     kp = cfg.get("ssh_key_path") or "/etc/ratholehub/id_ed25519"
+    norm_kp = os.path.normpath(kp)
+    if not norm_kp.startswith("/etc/ratholehub/"):
+        norm_kp = "/etc/ratholehub/id_ed25519"
+    kp = norm_kp
     pub = kp + ".pub"
-    if not (os.path.exists(kp) and os.path.exists(pub)):
-        os.makedirs(os.path.dirname(kp), exist_ok=True)
-        # agar yeki az do file nesfe-nim bashad, pak kon ta ssh-keygen gير nakonad
-        for f in (kp, pub):
-            try: os.remove(f)
-            except OSError: pass
+
+    if os.path.exists(kp):
+        # If private key exists but public key does not, derive it instead of deleting private key!
+        if not os.path.exists(pub):
+            try:
+                r = subprocess.run(["ssh-keygen", "-y", "-f", kp], capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and r.stdout.strip():
+                    with open(pub, "w", encoding="utf-8") as f:
+                        f.write(r.stdout.strip() + "\n")
+                    os.chmod(pub, 0o644)
+                else:
+                    raise RuntimeError("Failed to derive public key: " + (r.stderr or ""))
+            except Exception as e:
+                raise RuntimeError(f"Cannot read or derive public key for {kp}: {e}")
+    else:
+        # Private key does not exist: generate fresh key pair
+        os.makedirs(os.path.dirname(kp), mode=0o700, exist_ok=True)
+        if os.path.exists(pub):
+            try:
+                os.remove(pub)
+            except OSError:
+                pass
         r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "ratholehub", "-f", kp, "-q"],
                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0 or not os.path.exists(pub):
             raise RuntimeError("ssh-keygen shekast: " + (r.stderr or r.stdout or "?"))
-        try: os.chmod(kp, 0o600)
-        except OSError: pass
+        try:
+            os.chmod(kp, 0o600)
+            os.chmod(pub, 0o644)
+        except OSError:
+            pass
+
     if cfg.get("ssh_key_path") != kp:
-        # atomic: faghat ssh_key_path ra rooye naskhe-ye taze bezan (na kolle cfg-e bayat)
-        # ta ba _config_save-e hamzaman (masalan taghir-e ramz) race nakonad.
         def _set_kp(c):
             c["ssh_key_path"] = kp
             return c
         update_config(_set_kp)
+
     with open(pub, "r", encoding="utf-8") as f:
         return kp, f.read().strip()
 
@@ -376,9 +528,7 @@ def provision_server(d):
     if any(s.get("name") == name for s in get_inventory()):
         return {"rc": 1, "out": "", "err": "in nam az ghabl vojood darad"}
     server = {"name": name, "role": role, "host": host, "ssh_user": user, "ssh_port": int(port)}
-    # baraye node: server-e Iran-e main ra moshakhas kon (vorodi iran_server ya, agar
-    # faghat yek server Iran dar hub bashad, hamon). in tunnel-e asli (SERVER) ra baad az
-    # deploy tanzim mikonad ta node digar «?» nashan nadahad.
+    # baraye node: server-e Iran-e main ra moshakhas kon
     iran_host = ""; iran_srv = None
     if role == "node":
         want = str(d.get("iran_server", "")).strip()
@@ -392,8 +542,9 @@ def provision_server(d):
         elif len(irs) == 1:
             iran_host = str(irs[0].get("host", "")); iran_srv = irs[0]
     if MOCK:
+        server["status"] = "active"
         update_inventory(lambda inv: inv + [server] if not any(s.get("name") == name for s in inv) else inv)
-        return {"rc": 0, "out": "[mock provision→%s] kelid nصب shod + deploy + be hub ezafe shod" % name, "err": ""}
+        return {"rc": 0, "status": "active", "out": "[mock provision→%s] kelid nصب shod + deploy + be hub ezafe shod" % name, "err": ""}
     if not shutil.which("sshpass"):
         return {"rc": 1, "out": "", "err": "sshpass rooye hub nصب nist. nصب kon: apt install -y sshpass"}
     try:
@@ -403,14 +554,16 @@ def provision_server(d):
     logs = []
     opts = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=12", "-o", "NumberOfPasswordPrompts=1"]
     target = "%s@%s" % (user, host)
-    # 1) nصب kelid-e omoomi dar authorized_keys (idempotent — dobare ezafe nemikonad)
+    # 1) nصب kelid-e omoomi dar authorized_keys (idempotent)
     q = shlex.quote(pubkey)
     remote = ("set -e; umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
               "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; "
               "grep -qF %s ~/.ssh/authorized_keys || printf '%%s\\n' %s >> ~/.ssh/authorized_keys" % (q, q))
+    env = os.environ.copy()
+    env["SSHPASS"] = pw
     try:
-        r = subprocess.run(["sshpass", "-p", pw, "ssh"] + opts + ["-p", port, target, remote],
-                           capture_output=True, text=True, timeout=45)
+        r = subprocess.run(["sshpass", "-e", "ssh"] + opts + ["-p", port, target, remote],
+                           env=env, capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
         return {"rc": 124, "out": "", "err": "timeout dar atesal ba ramz (host/port/firewall?)"}
     except Exception as e:
@@ -423,25 +576,42 @@ def provision_server(d):
         if "permission denied" in low or "authentication" in low:
             emsg = "ramz/karbar eshtebah ast ya vorod ba ramz roo server baste ast (PasswordAuthentication)."
         return {"rc": r.returncode, "out": "\n\n".join(logs), "err": "nصب kelid shekast khord: " + emsg}
-    # 2) deploy ba kelid (scp scripts + update.sh) — server hanoz dar inventory nist pas mostaghim server dict ra midahim
+    # 2) deploy ba kelid (github-update)
     dep = deploy_to_server(server)
     logs.append("== deploy (github-update) ==\n" + (dep.get("out", "") or "") +
                 (("\n[stderr] " + dep.get("err", "")) if dep.get("err") else ""))
-    # 2.5) baraye node: tunnel-e asli (SERVER) ra be server-e Iran vasl kon ta «?» nashan nadahad.
-    # maghsad = DOMAIN-e omoomi-ye Iran (na host/IP-e SSH) ta SNI ba cert bekhanad va tunnel bala biad.
-    if role == "node" and iran_host and dep.get("rc") == 0:
+    if dep.get("rc") != 0:
+        server["status"] = "deploy_failed"
+        update_inventory(lambda inv: inv + [server] if not any(s.get("name") == name for s in inv) else inv)
+        logs.append("== be hub ezafe shod ba vaziat-e deploy_failed: %s (%s) ==" % (name, role))
+        return {
+            "rc": dep.get("rc", 1),
+            "status": "deploy_failed",
+            "out": "\n\n".join(logs),
+            "err": "deploy (github-update) shekast khord (rc=%s): %s" % (dep.get("rc"), dep.get("err", ""))
+        }
+    # 2.5) baraye node: tunnel-e asli (SERVER) ra be server-e Iran vasl kon
+    if role == "node" and iran_host:
         main_srv = (iran_main_server(iran_srv)[0] if iran_srv else "") or (iran_host + ":443")
         sset = run_on_server(server, ["ratholenode", "set", "SERVER", main_srv])
         logs.append("== tunnel-e asli → %s ==\n" % main_srv + (sset.get("out", "") or "") +
                     (("\n[stderr] " + sset.get("err", "")) if sset.get("err") else ""))
+        if sset.get("rc") != 0:
+            server["status"] = "server_unconfigured"
+            update_inventory(lambda inv: inv + [server] if not any(s.get("name") == name for s in inv) else inv)
+            return {
+                "rc": sset.get("rc", 1),
+                "status": "server_unconfigured",
+                "out": "\n\n".join(logs),
+                "err": "tanzim-e server-e Iran shekast khord: %s" % (sset.get("err", ""))
+            }
     elif role == "node" and not iran_host:
         logs.append("== [هشدار] server Iran-e main tanzim nashod — dar safhe-ye node ba «tanzim tunnel asli» vaslesh kon. ==")
-    # 3) sabt dar inventory (hata agar deploy naghes bood, kelid nصب shode va etesal ba kelid barقarار ast)
-    # 3) sabt dar inventory (hata agar deploy naghes bood, kelid nصب shode va etesal ba kelid barقarار ast)
+    # 3) sabt dar inventory ba status active
+    server["status"] = "active"
     update_inventory(lambda inv: inv + [server] if not any(s.get("name") == name for s in inv) else inv)
     logs.append("== be hub ezafe shod: %s (%s) — az in pas atesal ba kelid ast ==" % (name, role))
-    note = "" if dep.get("rc") == 0 else "\n[هشدار] deploy kamel nashod (rc=%s)؛ mitavani baad dokme «apdit» ra bezani." % dep.get("rc")
-    return {"rc": 0, "out": "\n\n".join(logs) + note, "err": ""}
+    return {"rc": 0, "status": "active", "out": "\n\n".join(logs), "err": ""}
 
 def mock_run(server, cmd_args):
     # prefix-e mohafez ('timeout N ...') baraye tatbigh-e mock bi-marbut ast — bardar.
@@ -847,13 +1017,17 @@ class Handler(BaseHTTPRequestHandler):
     def _body_json(self):
         try:
             n = int(self.headers.get("Content-Length", "0"))
-            # saghf-e andaze-ye body (1 MiB) ta yek Content-Length-e bozorg rooye masir-e
-            # ehraz-nashode (masalan /api/login) hafeze ra por nakonad.
-            if n > 1048576:
+            if n > 1048576 or n < 0:
+                return None
+            if n == 0:
                 return {}
-            return json.loads(self.rfile.read(n) or b"{}")
+            raw = self.rfile.read(n)
+            data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            if not isinstance(data, dict):
+                return None
+            return data
         except Exception:
-            return {}
+            return None
 
     def log_message(self, *a):
         pass  # sakt
@@ -928,36 +1102,53 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         p = path.replace("/hub", "", 1) if path.startswith("/hub/api") else path
         if p == "/api/login":
-            # kelid-e rate-limit ba X-Real-IP (mesl _user); posht-e nginx TCP-peer
-            # hamishe 127.0.0.1 ast pas yek bucket-e global mishavad va hame ra ghofl mikonad.
             ip = self.headers.get("X-Real-IP") or (self.client_address[0] if self.client_address else "?")
             if not login_allowed(ip):
                 return self._send(429, {"error": "too many attempts; try later"})
             data = self._body_json()
-            pw = str(data.get("password", "")).encode()
-            if hmac.compare_digest(hashlib.sha256(pw).hexdigest(), cfg["admin_password_sha256"]):
+            if data is None or not isinstance(data, dict):
+                return self._send(400, {"error": "malformed JSON request body"})
+            pw = str(data.get("password", ""))
+            stored_pw = cfg.get("admin_password_hash") or cfg.get("admin_password_sha256", "")
+            ok, needs_upgrade = verify_password(pw, stored_pw)
+            if ok:
                 login_reset(ip)
+                if needs_upgrade:
+                    new_hash = hash_password(pw)
+                    def _upgrade_pw(c):
+                        c["admin_password_hash"] = new_hash
+                        c.pop("admin_password_sha256", None)
+                        return c
+                    update_config(_upgrade_pw)
                 tok = make_session_token(cfg)
+                is_https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+                cookie_flags = "HttpOnly; SameSite=Strict; Path=/"
+                if is_https:
+                    cookie_flags += "; Secure"
                 return self._send(200, {"ok": True, "token": cfg["api_token"]},
-                                  extra_headers={"Set-Cookie": "rhsession=%s; HttpOnly; SameSite=Strict; Path=/" % tok})
+                                  extra_headers={"Set-Cookie": f"rhsession={tok}; {cookie_flags}"})
             login_record_fail(ip)
             return self._send(401, {"error": "bad password"})
 
         if not authed(cfg, self.headers, self._cookies()):
             return self._send(401, {"error": "unauthorized"})
 
+        body = self._body_json()
+        if body is None:
+            return self._send(400, {"error": "malformed JSON request body"})
+
         if p == "/api/servers":
-            return self._add_server(self._body_json())
+            return self._add_server(body)
         if p == "/api/provision":
-            return self._provision(self._body_json())
+            return self._provision(body)
         if p == "/api/config":
-            return self._config_save(self._body_json())
+            return self._config_save(body)
 
         m = re.match(r"^/api/servers/([A-Za-z0-9_-]+)/action$", p)
         if m:
-            return self._action(m.group(1), self._body_json())
+            return self._action(m.group(1), body)
         if p == "/api/ip-tls/prepare":
-            return self._prepare_ip_tls(self._body_json())
+            return self._prepare_ip_tls(body)
         return self._send(404, {"error": "not found"})
 
     def do_PUT(self):
@@ -966,9 +1157,12 @@ class Handler(BaseHTTPRequestHandler):
         p = p.replace("/hub", "", 1) if p.startswith("/hub/api") else p
         if not authed(cfg, self.headers, self._cookies()):
             return self._send(401, {"error": "unauthorized"})
+        body = self._body_json()
+        if body is None:
+            return self._send(400, {"error": "malformed JSON request body"})
         m = re.match(r"^/api/servers/([A-Za-z0-9_-]+)$", p)
         if m:
-            return self._edit_server(m.group(1), self._body_json())
+            return self._edit_server(m.group(1), body)
         return self._send(404, {"error": "not found"})
 
     def do_DELETE(self):
@@ -1037,41 +1231,52 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _config_save(self, d):
-        # tghiire ramz admin va/ya chrkhshe token API az dakhl panel.
-        # kolle read-modify-write zir-e _lock ta ba ensure_hub_key/save-e digar race nakonad.
+        if not isinstance(d, dict):
+            return self._send(400, {"error": "malformed JSON request body"})
         with _lock:
             cfg = get_config()
             changed = []
             new_pw = d.get("new_password")
             if new_pw is not None:
-                cur = str(d.get("current_password", "")).encode()
-                if not hmac.compare_digest(hashlib.sha256(cur).hexdigest(), cfg.get("admin_password_sha256", "")):
+                cur = str(d.get("current_password", ""))
+                stored_pw = cfg.get("admin_password_hash") or cfg.get("admin_password_sha256", "")
+                ok, _ = verify_password(cur, stored_pw)
+                if not ok:
                     return self._send(403, {"error": "current password incorrect"})
                 if not RE_PW.match(str(new_pw)):
                     return self._send(400, {"error": "password must be 6-128 chars"})
-                cfg["admin_password_sha256"] = hashlib.sha256(str(new_pw).encode()).hexdigest()
+                cfg["admin_password_hash"] = hash_password(str(new_pw))
+                cfg.pop("admin_password_sha256", None)
                 changed.append("password")
             new_token = None
             if d.get("rotate_token"):
                 new_token = secrets.token_hex(24)
                 cfg["api_token"] = new_token
                 changed.append("api_token")
-            # ssh_key_path: masir-e file (reshte). ssh_opts: HATMAN list-e reshte
-            # (chvn _ssh_base list(...)-esh mikonad; reshte be karaktr-ha shekaste mishavad).
-            if "ssh_key_path" in d and isinstance(d["ssh_key_path"], str):
-                cfg["ssh_key_path"] = d["ssh_key_path"]; changed.append("ssh_key_path")
+            if "ssh_key_path" in d:
+                kp_val = str(d["ssh_key_path"]).strip()
+                if kp_val:
+                    norm_kp = os.path.normpath(kp_val)
+                    if not (norm_kp.startswith("/etc/ratholehub/") or norm_kp == "/etc/ratholehub"):
+                        return self._send(400, {"error": "ssh_key_path must be located under /etc/ratholehub/"})
+                    cfg["ssh_key_path"] = norm_kp
+                else:
+                    cfg["ssh_key_path"] = ""
+                changed.append("ssh_key_path")
             if "ssh_opts" in d:
                 v = d["ssh_opts"]
-                if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
-                    return self._send(400, {"error": "ssh_opts must be a list of strings"})
-                cfg["ssh_opts"] = v; changed.append("ssh_opts")
+                ok, err = validate_ssh_opts(v)
+                if not ok:
+                    return self._send(400, {"error": f"Invalid ssh_opts: {err}"})
+                cfg["ssh_opts"] = v
+                changed.append("ssh_opts")
             if not changed:
                 return self._send(400, {"error": "nothing to change"})
             save_config(cfg)
         audit_log(self._user(), "-", "config_save", ",".join(changed), 0)
         out = {"ok": True, "changed": changed}
         if new_token:
-            out["api_token"] = new_token  # tnha bar namayesh token jadid
+            out["api_token"] = new_token
         return self._send(200, out)
 
     def _edit_server(self, name, d):
@@ -1151,7 +1356,11 @@ class Handler(BaseHTTPRequestHandler):
         s = self._find(name)
         if not s:
             return self._send(404, {"error": "server not found"})
+        if not isinstance(d, dict):
+            return self._send(400, {"error": "request body must be a JSON object"})
         action = str(d.get("action", "")); args = d.get("args", {}) or {}
+        if not isinstance(args, dict):
+            return self._send(400, {"error": "args must be an object"})
         if action == "deploy":
             res = deploy_to_server(s)
             audit_log(self._user(), name, "deploy", "github-update (install.sh --update)", res.get("rc"))
@@ -1160,9 +1369,10 @@ class Handler(BaseHTTPRequestHandler):
         if not cmd:
             return self._send(400, {"error": "unknown or invalid action"})
         res = run_on_server(s, cmd)
+        redacted_cmd_str = redact_cmd(cmd)
         if action in WRITE_ACTIONS:
-            audit_log(self._user(), name, action, " ".join(cmd), res.get("rc"))
-        return self._send(200, {"server": name, "cmd": " ".join(cmd), **res})
+            audit_log(self._user(), name, action, redacted_cmd_str, res.get("rc"))
+        return self._send(200, {"server": name, "cmd": redacted_cmd_str, **res})
 
     def _overview(self, name):
         s = self._find(name)

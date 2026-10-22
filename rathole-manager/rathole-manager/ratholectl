@@ -16,11 +16,8 @@ elif [ -f "$SCRIPT_DIR/common.sh" ]; then
   source "$SCRIPT_DIR/common.sh"
 fi
 
-# Temp-ha az command substitution bargasht dade mishavand; har caller baad az commit/masraf
-# khodesh pak mikonad. trap-e subshell-e ghadimi file ra pish az masraf-e caller hazf mikard.
-rth_mktemp(){ mktemp "$@"; }
-rth_mktempd(){ mktemp -d "$@"; }
-
+# amniat-e sarasari: umask 077
+umask 077
 
 STATE="/etc/rathole-manager/state.json"
 SERVER_TOML="/etc/rathole/server.toml"
@@ -33,6 +30,51 @@ NOISE_PATTERN_DEFAULT="Noise_NK_25519_ChaChaPoly_BLAKE2s"
 BH_TOML="/etc/rathole/backhaul-server.toml"
 BH_SVC="rathole-backhaul-server"
 BH_UNIT="/etc/systemd/system/${BH_SVC}.service"
+
+# Temp-ha ba permission 0600 dar haman filesystem-e maghsad sakhte mishavand
+rth_mktemp(){
+  local dir="${1:-}"
+  [ -n "$dir" ] && [ -d "$dir" ] || dir="$(dirname "$STATE" 2>/dev/null || echo /tmp)"
+  [ -d "$dir" ] || dir="/tmp"
+  local tmp
+  tmp="$(mktemp "$dir/rth.tmp.XXXXXX")" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  printf '%s\n' "$tmp"
+}
+rth_mktempd(){
+  local dir="${1:-}"
+  [ -n "$dir" ] && [ -d "$dir" ] || dir="/tmp"
+  local tmpd
+  tmpd="$(mktemp -d "$dir/rthd.tmp.XXXXXX")" || return 1
+  chmod 700 "$tmpd" 2>/dev/null || true
+  printf '%s\n' "$tmpd"
+}
+
+# Transactional state mutator (jelogiri az corruption / partial write / lost update)
+rth_state_tx(){
+  local sdir; sdir="$(dirname "$STATE")"
+  mkdir -p "$sdir"
+  chmod 700 "$sdir" 2>/dev/null || true
+  local tmp; tmp="$(rth_mktemp "$sdir")" || { err "sakht-e file-e movaghat baraye state shekast khord."; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! jq "$@" "$STATE" > "$tmp"; then
+    rm -f "$tmp"
+    err "amaliat-e jq rooye state shekast khord؛ state dast-nakhorde mand."
+    return 1
+  fi
+  if [ ! -s "$tmp" ] || ! jq empty "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    err "khorooji-e jq JSON-e motabar nist؛ state dast-nakhorde mand."
+    return 1
+  fi
+  if ! mv -f "$tmp" "$STATE"; then
+    rm -f "$tmp"
+    err "jaigozini-ye state shekast khord."
+    return 1
+  fi
+  chmod 600 "$STATE" 2>/dev/null || true
+  return 0
+}
 
 # TAVAJOH: c_g/c_r/c_y/log/warn/err/die/need_root/kcp_profile inja DOBARE tarif NEMISHAVAND —
 # tanha manba-eshan common.sh ast (bala source shod). ghablan har se file copy-e yeksan dashtand
@@ -181,7 +223,7 @@ cmd_restore(){
 # ---------- dstvr init ----------
 cmd_init(){
   need_root; need_bin jq
-  local domain="" cert_fc="" cert_key="" ctrl="" fake="" sub="" dstart="" astart="" nconf="" interactive=1 use_certbot=0 restore_file=""
+  local domain="" cert_fc="" cert_key="" ctrl="" fake="" sub="" dstart="" astart="" nconf="" interactive=1 use_certbot=0 restore_file="" force_init=0
   # halat flgmhvr (non-interactive) — agar har flgi dade shvd, taamoli nist
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -196,9 +238,15 @@ cmd_init(){
       --nginx-conf)    nconf="$2"; shift 2;;
       --restore)       restore_file="$2"; shift 2;;
       --certbot)       use_certbot=1; shift;;
+      --fresh|--force) force_init=1; shift;;
       *) shift;;
     esac
   done
+
+  # jologiri az hazf ya truncate-e bi-sedaye state-e mojood
+  if [ -s "$STATE" ] && [ "$force_init" -ne 1 ]; then
+    die "state az ghabl vojood darad ($STATE). baraye bazneveshtan az --fresh ya --force estefade konid."
+  fi
 
   # halat restore: agar file backup dade shode ya (taamoli) karbar masir dad
   if [ "$interactive" -eq 1 ] && [ -z "$restore_file" ]; then
@@ -239,6 +287,13 @@ cmd_init(){
   ctrl="${ctrl:-2333}"; fake="${fake:-8080}"; sub="${sub:-2096}"
   dstart="${dstart:-1001}"; astart="${astart:-7001}"
 
+  # etebarsanji port-ha
+  is_valid_port "$ctrl"   || die "control-port bayad adad beyn 1 ta 65535 bashad: '$ctrl'"
+  is_valid_port "$fake"   || die "fake-port bayad adad beyn 1 ta 65535 bashad: '$fake'"
+  is_valid_port "$sub"    || die "sub-port bayad adad beyn 1 ta 65535 bashad: '$sub'"
+  is_valid_port "$dstart" || die "data-start bayad adad beyn 1 ta 65535 bashad: '$dstart'"
+  is_valid_port "$astart" || die "api-start bayad adad beyn 1 ta 65535 bashad: '$astart'"
+
   # gvahi: chvn maamoolan az ghabl dari, certbot fght dar soorat drkhvast sarih ya entekhab dar halat taamoli
   if [ ! -f "$cert_fc" ] || [ ! -f "$cert_key" ]; then
     warn "gvahi dar masir dadhshdh peyda nashod: $cert_fc"
@@ -256,14 +311,38 @@ cmd_init(){
     log "gvahi mojood estefade mishavad: $cert_fc"
   fi
 
-  mkdir -p "$(dirname "$STATE")"
-  jq -n \
+  local sdir stmp
+  sdir="$(dirname "$STATE")"
+  mkdir -p "$sdir"
+  chmod 700 "$sdir" 2>/dev/null || true
+  stmp="$(rth_mktemp "$sdir")" || die "sakht-e file-e movaghat baraye state shekast khord."
+  chmod 600 "$stmp" 2>/dev/null || true
+
+  # agar state mojood bood va force bood, backup begir
+  if [ -s "$STATE" ]; then
+    cp -f "$STATE" "$sdir/state.json.bak.$$" 2>/dev/null || true
+    chmod 600 "$sdir/state.json.bak.$$" 2>/dev/null || true
+  fi
+
+  if ! jq -n \
     --arg d "$domain" --arg fc "$cert_fc" --arg key "$cert_key" --arg nc "$nconf" \
     --argjson ctrl "$ctrl" --argjson fake "$fake" --argjson sub "$sub" \
     --argjson ds "$dstart" --argjson apst "$astart" \
     '{domain:$d, cert_fullchain:$fc, cert_key:$key, nginx_conf:$nc, control_port:$ctrl,
       fake_port:$fake, sub_port:$sub, data_port_start:$ds, api_port_start:$apst, nodes:[]}' \
-    > "$STATE"
+    > "$stmp"; then
+    rm -f "$stmp"
+    die "sakht-e state ba jq shekast khord؛ state-e ghabli dast-nakhorde mand."
+  fi
+
+  if [ ! -s "$stmp" ] || ! jq empty "$stmp" 2>/dev/null; then
+    rm -f "$stmp"
+    die "state-e sakhte-shode JSON-e motabar nist؛ state-e ghabli dast-nakhorde mand."
+  fi
+
+  mv -f "$stmp" "$STATE" || { rm -f "$stmp"; die "jaigozini-ye state shekast khord."; }
+  chmod 600 "$STATE" 2>/dev/null || true
+
   # masir-e makhfi control WebSocket ra dar state bayaz mikonim (state_set zir set -uo darad)
   ensure_control_path > /dev/null
   log "state sakhte shod: $STATE (nginx → $nconf)"
@@ -324,8 +403,8 @@ cmd_add(){
   [ -n "$name" ] && [ -n "$inbound" ] || die "estefade: ratholectl add <name> <inbound_port> [--api-port <port>]"
   echo "$name" | grep -qE '^[a-zA-Z0-9_-]+$' || die "name fght hrvf/adad/khttirh mjaz ast."
   is_reserved_name "$name" && die "name '$name' rezerv shode (ba masir-e sabet-e nginx tadakhol darad); name-e digari entekhab kon."
-  echo "$inbound" | grep -qE '^[0-9]+$' || die "inbound bayad adad bashad."
-  [ -n "$api_port" ] && { echo "$api_port" | grep -qE '^[0-9]+$' || die "port api bayad adad bashad."; }
+  is_valid_port "$inbound" || die "inbound bayad adad beyn 1 ta 65535 bashad: '$inbound'"
+  [ -n "$api_port" ] && { is_valid_port "$api_port" || die "port api bayad adad beyn 1 ta 65535 bashad: '$api_port'"; }
   if jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null; then
     die "node '$name' az ghabl vojood darad."
   fi
@@ -355,8 +434,7 @@ cmd_add(){
   fi
 
   # faghat agar neveshtan-e state movafagh bood, success log/regenerate anjam shavad.
-  jq --argjson node "$node_json" '.nodes += [$node]' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE" \
-    || { rm -f "$STATE.tmp"; die "sabt-e node dar state shekast khord."; }
+  rth_state_tx --argjson node "$node_json" '.nodes += [$node]' || die "sabt-e node dar state shekast khord."
   log "node '$name' ezafe shod (path=/$name → 127.0.0.1:$dport)."
   regenerate
   print_node_install "$name"
@@ -368,7 +446,7 @@ cmd_rm(){
   local name="${1:-}"
   [ -n "$name" ] || die "estefade: ratholectl rm <name>"
   jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
-  jq --arg n "$name" '.nodes |= map(select(.name!=$n))' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+  rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))' || die "hazf-e node az state shekast khord."
   log "node '$name' hazf shod."
   regenerate
 }
@@ -415,6 +493,8 @@ gen_server_toml(){
       echo
     fi
     jq -r '.nodes[] | @base64' "$STATE" | while read -r row; do
+      row="${row%$'\r'}"
+      [ -n "$row" ] || continue
       _j(){ echo "$row" | base64 -d | jq -r "$1"; }
       local name port token aport atoken
       name="$(_j '.name')"; port="$(_j '.port')"; token="$(_j '.token')"
@@ -468,6 +548,8 @@ gen_noise_server_toml(){
       echo
     fi
     jq -r '.nodes[] | @base64' "$STATE" | while read -r row; do
+      row="${row%$'\r'}"
+      [ -n "$row" ] || continue
       _j(){ echo "$row" | base64 -d | jq -r "$1"; }
       local name port token aport atoken
       [ "$(_j '.transport // empty')" = noise ] || continue   # faghat node-haye noise
@@ -562,9 +644,10 @@ gen_backhaul_server_toml(){
 
 # ---------- etminan az vojood map erteghaye websocket dar conf.d ----------
 ensure_upgrade_map(){
-  local f=/etc/nginx/conf.d/rathole-upgrade-map.conf
+  local nconf_dir; nconf_dir="$(dirname "$NGINX_CONF")"
+  local f="${UPGRADE_MAP_CONF:-$nconf_dir/rathole-upgrade-map.conf}"
   if [ ! -f "$f" ]; then
-    mkdir -p /etc/nginx/conf.d
+    mkdir -p "$(dirname "$f")" 2>/dev/null || true
     cat > "$f" <<'MAP'
 # lazem baraye WebSocket/HTTPUpgrade
 map $http_upgrade $connection_upgrade {
@@ -712,6 +795,7 @@ PXB
     echo "    default      ${fake};"
     jq -r '.nodes[] | select(.sni == null) | [.name,(.port|tostring)] | @tsv' "$STATE" |
     while IFS=$'\t' read -r n p; do
+      n="${n%$'\r'}"; p="${p%$'\r'}"
       printf '    "~^/%s($|/)"   %s;\n' "$n" "$p"
     done
     echo "}"
@@ -771,6 +855,7 @@ PXB
       echo "    default      \"\";"
       jq -r '.nodes[] | select(.sni == null) | [.name,(.port|tostring)] | @tsv' "$STATE" |
       while IFS=$'\t' read -r n p; do
+        n="${n%$'\r'}"; p="${p%$'\r'}"
         printf '    "%s"   %s;\n' "$n" "$p"
       done
       echo "}"
@@ -1251,20 +1336,12 @@ print_node_install(){
 
 # ---------- abzarhaye taghir dar tvl zman ----------
 state_set(){ # $1=jqpath $2=value $3=type(str|num)
-  # BEHRANI: ghablan khorooji-e jq check nemishod va `mv` BI-GHARAR anjam mishod — pas har
-  # shekast-e jq (state-e kharab, jq-path-e ghalat, disk-e por) state.json ra ba yek file-e
-  # KHALI jaygozin mikard va HAMEYE node/token/port az beyn miraft. chon script ba `set -uo
-  # pipefail` (bedoon -e) ejra mishavad, khatta-ye jq khod-be-khod motevaghef nemikard.
-  local tmp; tmp="$(rth_mktemp)" || die "sakht-e file-e movaghat nashod."
   if [ "${3:-str}" = num ]; then
     echo "$2" | grep -qE '^[0-9]+$' || die "meghdar bayad adad bashad: $2"
-    jq "$1 = ($2)" "$STATE" > "$tmp" || die "jq shekast khord؛ state dast-nakhorde mand."
+    rth_state_tx "$1 = ($2)" || die "state_set shekast khord؛ state dast-nakhorde mand."
   else
-    jq --arg v "$2" "$1 = \$v" "$STATE" > "$tmp" || die "jq shekast khord؛ state dast-nakhorde mand."
+    rth_state_tx --arg v "$2" "$1 = \$v" || die "state_set shekast khord؛ state dast-nakhorde mand."
   fi
-  # file-e khali ya nim-kare HARGEZ nabayad jaygozin-e state shavad.
-  [ -s "$tmp" ] || die "khorooji-e jq khali bood؛ state dast-nakhorde mand."
-  mv "$tmp" "$STATE"
 }
 
 # taghir tanzimat srasri: ratholectl set <key> <value>
@@ -1295,43 +1372,64 @@ cmd_edit(){
   local name="${1:-}"; shift || true
   [ -n "$name" ] || die "estefade: ratholectl edit <name> [--inbound N] [--api-port N|off]"
   jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
-  local inbound="" api="" tmp
+  local inbound="" api=""
   while [ $# -gt 0 ]; do case "$1" in
     --inbound)  inbound="$2"; shift 2;;
     --api-port) api="$2"; shift 2;;
     *) shift;;
   esac; done
 
+  # etebarsanji avalie-ye hame-ye voroodi-ha (ghabl az har taghiri dar state)
   if [ -n "$inbound" ]; then
-    echo "$inbound" | grep -qE '^[0-9]+$' || die "inbound bayad adad bashad."
-    tmp="$(mktemp)"; jq --arg n "$name" --argjson ib "$inbound" \
-      '(.nodes[] | select(.name==$n) | .inbound_port) |= $ib' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
-    log "inbound node '$name' → $inbound"
+    is_valid_port "$inbound" || die "inbound bayad adad beyn 1 ta 65535 bashad: '$inbound'"
+  fi
+  if [ -n "$api" ] && [ "$api" != "off" ]; then
+    is_valid_port "$api" || die "port api bayad adad beyn 1 ta 65535 bashad: '$api'"
+  fi
+
+  # sakht-e pipeline-e jq baraye emal-e hamzaman (transaction)
+  local jq_filter='(.nodes[] | select(.name==$n)) |= ('
+  local jq_args=(--arg n "$name")
+  local muts=()
+
+  if [ -n "$inbound" ]; then
+    jq_args+=(--argjson ib "$inbound")
+    muts+=('.inbound_port = $ib')
   fi
 
   if [ -n "$api" ]; then
-    if [ "$api" = off ]; then
-      tmp="$(mktemp)"; jq --arg n "$name" \
-        '(.nodes[] | select(.name==$n)) |= del(.api_local_port, .api_inbound_port, .api_token)' \
-        "$STATE" > "$tmp" && mv "$tmp" "$STATE"
-      log "channel mdirit node '$name' khamoosh shod."
+    if [ "$api" = "off" ]; then
+      muts+=('del(.api_local_port, .api_inbound_port, .api_token)')
     else
-      echo "$api" | grep -qE '^[0-9]+$' || die "port api bayad adad bashad."
       local has_ap aport atoken astart
       has_ap="$(jq -r --arg n "$name" '.nodes[]|select(.name==$n)|.api_local_port // empty' "$STATE")"
       if [ -z "$has_ap" ]; then
-        astart="$(s_get '.api_port_start')"; aport="$(next_port api_local_port "$astart")"; atoken="$(gen_token)"
-        tmp="$(mktemp)"; jq --arg n "$name" --argjson ap "$aport" --argjson aib "$api" --arg at "$atoken" \
-          '(.nodes[]|select(.name==$n)) |= (. + {api_local_port:$ap, api_inbound_port:$aib, api_token:$at})' \
-          "$STATE" > "$tmp" && mv "$tmp" "$STATE"
-        log "channel mdirit roshan shod (lvkal $aport)."
+        astart="$(s_get '.api_port_start')"
+        aport="$(next_port api_local_port "$astart")"
+        atoken="$(gen_token)"
+        jq_args+=(--argjson ap "$aport" --argjson aib "$api" --arg at "$atoken")
+        muts+=('. + {api_local_port:$ap, api_inbound_port:$aib, api_token:$at}')
       else
-        tmp="$(mktemp)"; jq --arg n "$name" --argjson aib "$api" \
-          '(.nodes[]|select(.name==$n)|.api_inbound_port) |= $aib' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
-        log "port inbound mdirit node '$name' → $api"
+        jq_args+=(--argjson aib "$api")
+        muts+=('.api_inbound_port = $aib')
       fi
     fi
   fi
+
+  if [ "${#muts[@]}" -eq 0 ]; then
+    warn "hich taghiri dade nashod."
+    return 0
+  fi
+
+  local combined_mut=""
+  for m in "${muts[@]}"; do
+    if [ -z "$combined_mut" ]; then combined_mut="$m"; else combined_mut="$combined_mut | $m"; fi
+  done
+  jq_filter="${jq_filter}${combined_mut})"
+
+  # emal-e atomic
+  rth_state_tx "${jq_args[@]}" "$jq_filter" || die "virayesh-e node shekast khord؛ state dast-nakhorde mand."
+  log "node '$name' virayesh shod."
   regenerate
   print_node_install "$name"
 }
@@ -1346,8 +1444,7 @@ cmd_rename(){
   jq -e --arg n "$old" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$old' peyda nashod."
   jq -e --arg n "$new" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null && die "name '$new' ghblaan vojood darad."
   local is_game; is_game="$(jq -r --arg n "$old" '.nodes[]|select(.name==$n)|.sni // empty' "$STATE")"
-  local tmp; tmp="$(mktemp)"
-  jq --arg o "$old" --arg n "$new" '(.nodes[]|select(.name==$o)|.name) |= $n' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  rth_state_tx --arg o "$old" --arg n "$new" '(.nodes[]|select(.name==$o)|.name) |= $n' || die "taghir name-e node shekast khord."
   warn "masir karbar az /$old be /$new taghir krd; config karbaran va path inbound Xray node ra ham beroozresani kon."
   # MOHEM: rathole service ra ba NAME juft mikonad. node hanooz service-e '$old' ra darad,
   # pas tunnel ta zamani ke rooye node service ra rename nakoni ghat mimanad.
@@ -1363,12 +1460,15 @@ cmd_rotate(){
   local name="${1:-}"
   [ -n "$name" ] || die "estefade: ratholectl rotate <name>"
   jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null || die "node '$name' peyda nashod."
-  local tmp newt; tmp="$(mktemp)"; newt="$(gen_token)"
-  jq --arg n "$name" --arg t "$newt" '(.nodes[]|select(.name==$n)|.token) |= $t' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
-  # agar channel mdirit dard, token an ham chrkhandh shavad
-  if jq -e --arg n "$name" '.nodes[]|select(.name==$n)|.api_token' "$STATE" >/dev/null; then
-    tmp="$(mktemp)"; jq --arg n "$name" --arg t "$(gen_token)" \
-      '(.nodes[]|select(.name==$n)|.api_token) |= $t' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+  local newt; newt="$(gen_token)"
+  local has_api; has_api="$(jq -r --arg n "$name" '.nodes[]|select(.name==$n)|.api_token // empty' "$STATE")"
+  if [ -n "$has_api" ]; then
+    local new_apit; new_apit="$(gen_token)"
+    rth_state_tx --arg n "$name" --arg t "$newt" --arg at "$new_apit" \
+      '(.nodes[]|select(.name==$n)) |= (.token = $t | .api_token = $at)' || die "charkhesh-e token shekast khord."
+  else
+    rth_state_tx --arg n "$name" --arg t "$newt" \
+      '(.nodes[]|select(.name==$n)|.token) |= $t' || die "charkhesh-e token shekast khord."
   fi
   log "token node '$name' chrkhandh shod. rooye node bayad ba token jadid dvbarh nasb/beroozresani shavad."
   regenerate
@@ -1380,20 +1480,21 @@ cmd_show(){ ensure_state; print_node_install "${1:-}"; }
 
 # ---------- L4 tst (stream+SNI) mvazi rooye port jda ----------
 ensure_stream_include(){
-  local nc=/etc/nginx/nginx.conf
+  local nc="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
+  local sdir; sdir="$(dirname "$STREAM_CONF")"
+  mkdir -p "$sdir" 2>/dev/null || true
+  [ -f "$nc" ] || return 0
   if command -v dpkg >/dev/null 2>&1 && ! dpkg -s libnginx-mod-stream >/dev/null 2>&1; then
     apt-get update -qq 2>/dev/null && apt-get install -y -qq libnginx-mod-stream 2>/dev/null || true
   fi
-  grep -qE 'include[[:space:]]+/etc/nginx/stream\.d/\*\.conf' "$nc" && { mkdir -p /etc/nginx/stream.d; return 0; }
+  grep -qE 'include[[:space:]]+.+stream\.d/\*\.conf' "$nc" 2>/dev/null && return 0
   if grep -qE '^[[:space:]]*stream[[:space:]]*\{' "$nc"; then
     warn "blak stream az ghabl dar nginx.conf hst. in kht ra dasti dakhlsh bgzar:"
-    warn "    include /etc/nginx/stream.d/*.conf;"
-    mkdir -p /etc/nginx/stream.d
+    warn "    include $sdir/*.conf;"
     return 0
   fi
-  cp -a "$nc" "$nc.l4.bak"
-  mkdir -p /etc/nginx/stream.d
-  printf '\nstream {\n    include /etc/nginx/stream.d/*.conf;\n}\n' >> "$nc"
+  cp -a "$nc" "$nc.l4.bak" 2>/dev/null || true
+  printf '\nstream {\n    include %s/*.conf;\n}\n' "$sdir" >> "$nc" 2>/dev/null || true
   log "blak stream be nginx.conf ezafe shod (backup: $nc.l4.bak)."
 }
 
@@ -3190,9 +3291,10 @@ main(){
 # rah-e hal: KOL-e dastoor zir yek ghofl-e sarasari. dastoor-haye faghat-khandani
 # (ls/status/show/...) ham ghofl migirand — arzan ast va sadegi mohem-tar.
 # fallback-e mkdir baraye sistem-haye bedoon-e flock (hamsan-e rth_commit_config).
-RTH_LOCK="/run/ratholectl.lock"
+RTH_LOCK="${RTH_LOCK:-/run/ratholectl.lock}"
 rth_with_lock(){
   mkdir -p "$(dirname "$RTH_LOCK")" 2>/dev/null || RTH_LOCK="/tmp/ratholectl.lock"
+  local timeout_sec="${RTH_LOCK_TIMEOUT:-30}"
   if command -v flock >/dev/null 2>&1; then
     # BEHRANI: `exec 9>file 2>/dev/null` (bedoon-e command) redirect ra DAEMI mikonad —
     # yaani stderr-e KOL-e process ta akhar be /dev/null miraft va HAMEYE payam-haye
@@ -3200,21 +3302,31 @@ rth_with_lock(){
     # faghat «init shekast khord» ra midid). ba group، 2>/dev/null faghat baraye hamin
     # exec eemal mishavad va fd 9 ham hamchenan set mishavad.
     { exec 9>"$RTH_LOCK"; } 2>/dev/null || { "$@"; return $?; }
-    if flock -w 30 9; then RTH_LOCK_HELD=1
-    else warn "ghofl-e state azad nashod (30s); edame midaham."; fi
+    if flock -w "$timeout_sec" 9; then
+      RTH_LOCK_HELD=1
+    else
+      err "ghofl-e state azad nashod (flock timeout ${timeout_sec}s); amaliat baraye jelogiri az race condition motavaghef shod."
+      exec 9>&-
+      return 1
+    fi
     "$@"; local rc=$?
     RTH_LOCK_HELD=0
     exec 9>&-
     return $rc
   fi
   local d="${RTH_LOCK}.d" i=0 held=0
-  while [ "$i" -lt 300 ]; do
+  local max_tries=$((timeout_sec * 10))
+  [ "$max_tries" -ge 1 ] 2>/dev/null || max_tries=1
+  while [ "$i" -lt "$max_tries" ]; do
     if mkdir "$d" 2>/dev/null; then held=1; break; fi
     i=$((i+1)); sleep 0.1 2>/dev/null || sleep 1
   done
-  [ "$held" -eq 1 ] || warn "ghofl-e state azad nashod (timeout); edame midaham."
+  if [ "$held" -ne 1 ]; then
+    err "ghofl-e state azad nashod (mkdir timeout); amaliat baraye jelogiri az race condition motavaghef shod."
+    return 1
+  fi
   "$@"; local rc=$?
-  [ "$held" -eq 1 ] && rmdir "$d" 2>/dev/null
+  rmdir "$d" 2>/dev/null
   return $rc
 }
 

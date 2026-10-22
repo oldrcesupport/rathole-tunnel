@@ -1,6 +1,9 @@
 # common.sh — tavabe eshteraki beyn ratholectl, ratholenode va nsabha
 # in file tvst source frakhvani mishvd; be tnhaii ejra nemishavad.
 
+# amniat-e sarasari-ye file-ha: pishfarz-e umask 077 ta hich secret/state/config-i world-readable nashavad.
+umask 077
+
 # noskhe-ye rathole-manager (panel/node/hub). moqe-e release in adad ba tag hamahang mishavad.
 # package.sh/CI mitavanad in ra be tag-e vaghei stamp konad; agar dast taghir dadi، bedoon 'v' bezar.
 MANAGER_VERSION="1.8.4"
@@ -13,6 +16,13 @@ warn(){ printf '%s %s\n' "$(c_y '[*]')" "$*"; }
 err(){ printf '%s %s\n' "$(c_r '[!]')" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "bayad ba root ejra shavad (sudo)."; }
+
+# etebarsanji-ye motahed-e port (1 ta 65535)
+is_valid_port(){
+  local p="${1:-}"
+  [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+  [ "$p" -ge 1 ] 2>/dev/null && [ "$p" -le 65535 ] 2>/dev/null
+}
 
 # ---------- porsesh-e taamoli-ye amn (tty-safe + bounded) ----------
 # CHERA (bug-e «nasb dar marhale-ye tanzimat-e avalie saat-ha motevaghef mishavad»):
@@ -42,7 +52,7 @@ RTH_LOCK_HELD=0
 rth_lock_pause(){ if [ "${RTH_LOCK_HELD:-0}" = 1 ]; then flock -u 9 2>/dev/null || true; fi; }
 rth_lock_resume(){
   if [ "${RTH_LOCK_HELD:-0}" = 1 ]; then
-    flock -w 30 9 2>/dev/null || warn "ghofl-e state pas az javab azad nashod (30s); edame midaham."
+    flock -w 30 9 2>/dev/null || die "ghofl-e state pas az javab azad nashod (30s timeout); baraye jelogiri az corruption motavaghef mishavam."
   fi
 }
 
@@ -81,14 +91,9 @@ resolve_beta_tag(){
   return 1
 }
 
-# neveshtan-e amn-e in-place ba lock-e sidecar (hefz inode baraye hot-reload-e rathole).
+# neveshtan-e amn-e atomic ba lock va staging dar haman filesystem (jelogiri az khandane config-e nim-kare).
 # $1 = file-e movaqqat (generated); $2 = file-e live (masir-e vaghei config).
 # agar src khali bashad (0 byte) rad mikonad ta rathole config-e naghes nabinad.
-# flock hamishe mojood nist (image-e minimal bedoon-e util-linux، MSYS/Git-Bash). ghablan
-# nabudanash BI-SEDA ghofl ra az beyn mibord: `flock: command not found` be stderr miraft
-# vali subshell rc=0 barmigardand — pas `|| return 1` fael nemishod va config BEDOON-e ghofl
-# neveshte mishod. do neveshtan-e hamzaman → config-e nim-kare ke rathole hot-reload mikonad.
-# pas yek bar tashkhis midahim va agar nabood az mkdir (atomic dar POSIX) ghofl misazim.
 _RTH_HAS_FLOCK=""
 _rth_has_flock(){
   [ -n "$_RTH_HAS_FLOCK" ] || { command -v flock >/dev/null 2>&1 && _RTH_HAS_FLOCK=1 || _RTH_HAS_FLOCK=0; }
@@ -98,27 +103,39 @@ _rth_has_flock(){
 rth_commit_config(){
   local src="$1" dst="$2" lock="${2}.lock"
   [ -s "$src" ] || { err "config-e jadid khali ast: $src"; return 1; }
-  mkdir -p "$(dirname "$dst")"
+  local dir; dir="$(dirname "$dst")"
+  mkdir -p "$dir"
+  chmod 700 "$dir" 2>/dev/null || true
+  local tmp="${dst}.tmp.$$"
+  cp -f "$src" "$tmp" 2>/dev/null || cat "$src" > "$tmp" || { err "sakht-e config-e staging shekast khord: $tmp"; rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+
   if _rth_has_flock; then
     (
-      flock -x 9
-      cat "$src" > "$dst"
-    ) 9>"$lock" || return 1
+      flock -x -w 30 9 || exit 1
+      mv -f "$tmp" "$dst"
+    ) 9>"$lock" || {
+      err "ghofl-e config azad nashod (flock timeout 30s); amaliat motavaghef shod."
+      rm -f "$tmp"
+      return 1
+    }
   else
-    # fallback-e portable: mkdir atomic ast. ta ~5 sanie montazer mimanim؛ agar ghofl azad
-    # nashod (masalan process-e ghabli mord va lockdir mande) HOSHDAR midahim va edame —
-    # gir kardan-e hamishegi bad-tar az neveshtan-e bedoon-e ghofl ast.
     local d="${dst}.lockd" i=0 held=0 rc=0
     while [ "$i" -lt 50 ]; do
       if mkdir "$d" 2>/dev/null; then held=1; break; fi
       i=$((i+1)); sleep 0.1 2>/dev/null || sleep 1
     done
-    [ "$held" -eq 1 ] || warn "ghofl-e '$dst' azad nashod (timeout); bedoon-e ghofl minevisam."
-    cat "$src" > "$dst" || rc=1
-    [ "$held" -eq 1 ] && rmdir "$d" 2>/dev/null
-    [ "$rc" -eq 0 ] || return 1
+    if [ "$held" -ne 1 ]; then
+      err "ghofl-e '$dst' azad nashod (mkdir timeout); baraye jelogiri az corruption motavaghef mishavam."
+      rm -f "$tmp"
+      return 1
+    fi
+    mv -f "$tmp" "$dst" || rc=1
+    rmdir "$d" 2>/dev/null
+    [ "$rc" -eq 0 ] || { rm -f "$tmp"; return 1; }
   fi
-  rm -f "$src"
+  chmod 600 "$dst" 2>/dev/null || true
+  rm -f "$src" "$tmp"
 }
 
 

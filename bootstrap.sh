@@ -18,6 +18,9 @@
 
 set -euo pipefail
 
+# amniat-e sarasari: umask 077
+umask 077
+
 BUNDLE_URL="${BUNDLE_URL:-}"
 LOCAL=""
 INSTALL_DIR="${INSTALL_DIR:-/opt/rathole-manager}"
@@ -163,12 +166,42 @@ download(){
 # ---------- baz kardan ----------
 extract(){
   local file="$1" dest="$2"; mkdir -p "$dest"
+  chmod 700 "$dest" 2>/dev/null || true
   case "$file" in
-    *.zip) command -v unzip >/dev/null 2>&1 || die "unzip nasb nist."; unzip -o "$file" -d "$dest" >/dev/null; fix_backslash_names "$dest" ;;
-    *.tar.gz|*.tgz) tar -xzf "$file" -C "$dest" ;;
-    *.tar) tar -xf "$file" -C "$dest" ;;
-    *) if head -c 2 "$file" | grep -q "PK"; then unzip -o "$file" -d "$dest" >/dev/null; fix_backslash_names "$dest"
-       else tar -xzf "$file" -C "$dest" 2>/dev/null || die "frmt file nashenakhte ast."; fi ;;
+    *.zip)
+      command -v unzip >/dev/null 2>&1 || die "unzip nasb nist."
+      if unzip -l "$file" 2>/dev/null | awk '{print $4}' | grep -E '(^/|\.\.)'; then
+        die "arshiv zip shamel masir-e mashkook/traversal ast."
+      fi
+      unzip -o "$file" -d "$dest" >/dev/null
+      fix_backslash_names "$dest"
+      ;;
+    *.tar.gz|*.tgz)
+      if tar -tzf "$file" 2>/dev/null | grep -E '(^/|\.\.)'; then
+        die "arshiv tar.gz shamel masir-e mashkook/traversal ast."
+      fi
+      tar -xzf "$file" -C "$dest"
+      ;;
+    *.tar)
+      if tar -tf "$file" 2>/dev/null | grep -E '(^/|\.\.)'; then
+        die "arshiv tar shamel masir-e mashkook/traversal ast."
+      fi
+      tar -xf "$file" -C "$dest"
+      ;;
+    *)
+      if head -c 2 "$file" | grep -q "PK"; then
+        if unzip -l "$file" 2>/dev/null | awk '{print $4}' | grep -E '(^/|\.\.)'; then
+          die "arshiv zip shamel masir-e mashkook/traversal ast."
+        fi
+        unzip -o "$file" -d "$dest" >/dev/null
+        fix_backslash_names "$dest"
+      else
+        if tar -tzf "$file" 2>/dev/null | grep -E '(^/|\.\.)'; then
+          die "arshiv shamel masir-e mashkook/traversal ast."
+        fi
+        tar -xzf "$file" -C "$dest" 2>/dev/null || die "frmt file nashenakhte ast."
+      fi
+      ;;
   esac
 }
 

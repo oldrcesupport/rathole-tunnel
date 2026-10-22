@@ -14,6 +14,7 @@
 #
 # agar state/config mojood bashad fght regenerate miknd; agar init anjam nshdh, init ra ejra mikonad.
 set -euo pipefail
+umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")"
 
 c_g(){ printf '\033[1;32m%s\033[0m' "$*"; }
@@ -190,6 +191,7 @@ snapshot_now(){ # $@ = naghsh-ha ; khorooji: masir-e snapshot dir (rooye stdout 
   ts="$(date +%Y%m%d-%H%M%S)"
   dir="$BACKUP_ROOT/pre-update-$ts"
   mkdir -p "$dir"
+  chmod 700 "$dir"
   # list-e masir-haye mojood
   mapfile -t paths < <(snapshot_paths "$@")
   if [ "${#paths[@]}" -eq 0 ]; then
@@ -208,12 +210,21 @@ snapshot_now(){ # $@ = naghsh-ha ; khorooji: masir-e snapshot dir (rooye stdout 
     echo "files:"
     printf '%s\n' "${paths[@]}"
   } > "$dir/manifest.txt"
+  chmod 600 "$dir/manifest.txt"
   # tar ba masir-haye motlagh (strip-e / -e ebtedaii) — restore ba tar -xzf ... -C /
   local rels=(); local p
   for p in "${paths[@]}"; do rels+=("${p#/}"); done
-  tar -czf "$dir/backup.tar.gz" -C / "${rels[@]}" 2>/dev/null || {
-    warn "sakht-e tar-e backup ba khata (edame midahim vali rollback mumken ast naghes bashad)." >&2
-  }
+  if ! tar -czf "$dir/backup.tar.gz" -C / "${rels[@]}" 2>/dev/null; then
+    err "sakht-e tar-e backup ba khata movajeh shod." >&2
+    rm -rf "$dir"
+    echo ""; return 1
+  fi
+  if [ ! -s "$dir/backup.tar.gz" ]; then
+    err "file-e backup.tar.gz khali ast." >&2
+    rm -rf "$dir"
+    echo ""; return 1
+  fi
+  chmod 600 "$dir/backup.tar.gz"
   log "snapshot gereftه shod: $dir  (${#paths[@]} file/pvshh)" >&2
   # retention: faghat akharin RETENTION ta ra negah dar
   prune_snapshots
@@ -293,6 +304,9 @@ rollback_to(){ # $1 = masir-e snapshot dir
   [ -f "$dir/backup.tar.gz" ] || die "file-e backup.tar.gz dar snapshot nist: $dir"
   local roles; roles="$(sed -n 's/^roles=//p' "$dir/manifest.txt" 2>/dev/null)"
   warn "rollback be snapshot: $(basename "$dir")  (roles: ${roles:-?})"
+  if tar -tzf "$dir/backup.tar.gz" | grep -E '(^/|\.\.)'; then
+    die "tar archive daraye masirhaye khatarnak (absolute ya ..) ast."
+  fi
   tar -xzf "$dir/backup.tar.gz" -C / || die "estekhraj-e backup shekast khord."
   systemctl daemon-reload 2>/dev/null || true
   # shellcheck disable=SC2086
@@ -492,6 +506,9 @@ log "naghsh-haye tashkhis-dade-shode: ${ROLES[*]}"
 # gard-e zed-e downgrade: GHABL az snapshot/apply — agar baste ghadimi-tar bashad hich kar nemikonim.
 downgrade_guard
 SNAP_DIR="$(snapshot_now "${ROLES[@]}")"
+if [ -z "$SNAP_DIR" ] && [ "$AUTO_ROLLBACK" -eq 1 ]; then
+  die "sakht-e snapshot shekast khord; update motovaghef shod (jelogiri az taghir-e bedoon-e bazgasht)."
+fi
 [ -n "$SNAP_DIR" ] || warn "snapshot gerefte nashod؛ update bدون emkan-e rollback edame miyabad."
 
 # اعمال آپدیت
