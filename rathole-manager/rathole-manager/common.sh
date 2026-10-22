@@ -103,19 +103,33 @@ _rth_has_flock(){
 rth_commit_config(){
   local src="$1" dst="$2" lock="${2}.lock"
   [ -s "$src" ] || { err "config-e jadid khali ast: $src"; return 1; }
+  [ -L "$dst" ] && { err "masir-e maghsad symlink ast: $dst"; return 1; }
+  [ -L "$lock" ] && { err "masir-e ghofl symlink ast: $lock"; return 1; }
   local dir; dir="$(dirname "$dst")"
+  [ -L "$dir" ] && { err "directory-e maghsad symlink ast: $dir"; return 1; }
   mkdir -p "$dir" || { err "nemitoonam directory-e config ra besazam: $dir"; return 1; }
-  chmod 700 "$dir" 2>/dev/null || true
-  local tmp="${dst}.tmp.$$"
-  cp -f "$src" "$tmp" 2>/dev/null || cat "$src" > "$tmp" || { err "sakht-e config-e staging shekast khord: $tmp"; rm -f "$tmp"; return 1; }
+  case "$dir" in
+    */rathole|*/rathole/*|*/rathole-manager|*/rathole-manager/*)
+      chmod 700 "$dir" 2>/dev/null || true
+      ;;
+  esac
+  local tmp
+  tmp="$(mktemp "${dir}/.$(basename "$dst").tmp.XXXXXX" 2>/dev/null || mktemp)" || {
+    err "sakht-e config-e staging shekast khord"; return 1;
+  }
   chmod 600 "$tmp" 2>/dev/null || true
+  if ! cp -f "$src" "$tmp" 2>/dev/null; then
+    err "kopi be config-e staging shekast khord: $tmp"
+    rm -f "$tmp"
+    return 1
+  fi
 
   if _rth_has_flock; then
     local lock_rc=0
     (
       flock -x -w 30 9 || exit 2
       mv -f "$tmp" "$dst" || exit 3
-    ) 9>"$lock" || lock_rc=$?
+    ) 9>>"$lock" || lock_rc=$?
     if [ "$lock_rc" -eq 2 ]; then
       err "ghofl-e config azad nashod (flock timeout 30s): $dst"
       rm -f "$tmp"
@@ -131,6 +145,7 @@ rth_commit_config(){
     fi
   else
     local d="${dst}.lockd" i=0 held=0 rc=0
+    [ -L "$d" ] && { rm -f "$tmp"; err "lock directory symlink ast: $d"; return 1; }
     while [ "$i" -lt 50 ]; do
       if mkdir "$d" 2>/dev/null; then held=1; break; fi
       i=$((i+1)); sleep 0.1 2>/dev/null || sleep 1

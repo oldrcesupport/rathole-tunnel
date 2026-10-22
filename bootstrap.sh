@@ -72,6 +72,7 @@ while [ $# -gt 0 ]; do
     --purge)   MODE="uninstall"; PURGE=1; shift;;
     --no-run)  RUN=0; shift;;
 
+    --sha256)  EXPECTED_SHA256="$2"; shift 2;;
     --yes|-y)  ASSUME_YES=1; shift;;
     --)        shift; PASS_ARGS+=("$@"); break;;
     *)         PASS_ARGS+=("$1"); shift;;
@@ -94,6 +95,7 @@ install_prereqs(){
 
   local missing=()
   command -v tar >/dev/null 2>&1 || missing+=("tar")
+  command -v unzip >/dev/null 2>&1 || missing+=("unzip")
   if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     missing+=("curl/wget")
   fi
@@ -163,53 +165,245 @@ resolve_source(){
   fi
 }
 
-# ---------- download ----------
+# ---------- download va checksum ----------
 download(){
   local url="$1" out="$2"
   log "download baste az: $url"
-  if command -v curl >/dev/null 2>&1; then curl -fSL --retry 3 --connect-timeout 20 "$url" -o "$out"
-  elif command -v wget >/dev/null 2>&1; then wget -O "$out" "$url"
-  else return 1; fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -fSL --retry 3 --connect-timeout 20 "$url" -o "$out" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" "$url" || return 1
+  else
+    return 1
+  fi
+  [ -s "$out" ] || { err "file-e download shode khali ast"; return 1; }
+  if head -n 5 "$out" 2>/dev/null | grep -qiE '<!DOCTYPE|<html|<head|<error'; then
+    err "file-e download shode be nazar HTML/error miad na archive."
+    return 1
+  fi
+  return 0
+}
+
+verify_sha256(){
+  local file="$1" expected_sum="$2"
+  [ -f "$file" ] || return 1
+  [ -n "$expected_sum" ] || return 0
+  local actual_sum=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_sum="$(sha256sum "$file" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual_sum="$(shasum -a 256 "$file" | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    actual_sum="$(openssl dgst -sha256 "$file" | awk '{print $NF}')"
+  else
+    err "abzar-e mohasebe-ye sha256 peyda nashod."
+    return 1
+  fi
+  if [ "$actual_sum" != "$expected_sum" ]; then
+    err "checksum match nashod! entezar: $expected_sum , khorooji: $actual_sum"
+    return 1
+  fi
+  log "checksum-e sha256 ba movafaghiat taiid shod: $actual_sum"
+  return 0
+}
+
+_rth_validate_archive_python(){
+  local archive="$1" type="$2"
+  local py=""
+  if command -v python3 >/dev/null 2>&1; then py=python3
+  elif command -v python >/dev/null 2>&1; then py=python
+  fi
+  [ -n "$py" ] || return 2
+  "$py" - "$archive" "$type" <<'PYEOF'
+import sys, os
+
+archive, atype = sys.argv[1], sys.argv[2]
+if not os.path.isfile(archive) or os.path.getsize(archive) == 0:
+    sys.exit(1)
+
+def is_safe_relpath(p):
+    if not p:
+        return False
+    if p.startswith('/') or (len(p) > 1 and p[1] == ':'):
+        return False
+    norm = p.replace('\\', '/')
+    parts = norm.split('/')
+    if '..' in parts:
+        return False
+    return True
+
+if atype == "zip":
+    import zipfile
+    try:
+        with zipfile.ZipFile(archive, 'r') as zf:
+            infolist = zf.infolist()
+            if not infolist:
+                sys.exit(1)
+            for info in infolist:
+                if not is_safe_relpath(info.filename):
+                    sys.exit(1)
+                mode = info.external_attr >> 16
+                if (mode & 0o170000) == 0o120000:
+                    sys.exit(1)
+    except Exception:
+        sys.exit(1)
+elif atype in ("tar", "tar.gz", "tgz"):
+    import tarfile
+    try:
+        with tarfile.open(archive, 'r:*') as tf:
+            members = tf.getmembers()
+            if not members:
+                sys.exit(1)
+            for m in members:
+                if not is_safe_relpath(m.name):
+                    sys.exit(1)
+                if m.isdev() or m.ischr() or m.isblk() or m.isfifo():
+                    sys.exit(1)
+                if m.issym() or m.islnk():
+                    target = m.linkname
+                    if target.startswith('/') or (len(target) > 1 and target[1] == ':'):
+                        sys.exit(1)
+                    if '..' in target.replace('\\', '/').split('/'):
+                        sys.exit(1)
+    except Exception:
+        sys.exit(1)
+else:
+    sys.exit(1)
+sys.exit(0)
+PYEOF
 }
 
 validate_zip_archive(){
   local archive="$1"
   [ -f "$archive" ] || return 1
+  [ -s "$archive" ] || return 1
+
+  local py_rc=0
+  _rth_validate_archive_python "$archive" "zip"
+  py_rc=$?
+  if [ "$py_rc" -eq 0 ]; then return 0; fi
+  if [ "$py_rc" -eq 1 ]; then return 1; fi
+
   command -v unzip >/dev/null 2>&1 || return 1
+  local tmp_list; tmp_list="$(mktemp 2>/dev/null || echo "${archive}.list.$$")"
+
+  if ! unzip -tq "$archive" >/dev/null 2>&1; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_zip_archive: zip archive kharab ya gheyre-ghabel-e khandan ast"
+    return 1
+  fi
+
+  if ! unzip -Z "$archive" > "$tmp_list" 2>/dev/null || [ ! -s "$tmp_list" ]; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_zip_archive: baz kardan-e fehrest-e zip shekast khord"
+    return 1
+  fi
+
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      l*|"lrwx"*)
+        err "validate_zip_archive: symlink dar zip mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+    esac
+  done < "$tmp_list"
+
+  if ! unzip -Z1 "$archive" > "$tmp_list" 2>/dev/null || [ ! -s "$tmp_list" ]; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_zip_archive: baz kardan-e asami-ye zip shekast khord"
+    return 1
+  fi
+
   local entry
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
       /*|[A-Za-z]:*)
         err "validate_zip_archive: masir-e motlagh dar zip mojaz nist: $entry"
+        rm -f "$tmp_list" 2>/dev/null
         return 1
         ;;
     esac
     if echo "$entry" | grep -qE '(^|/|\\)\.\.(/|\\|$)'; then
       err "validate_zip_archive: path traversal (..) dar zip mojaz nist: $entry"
+      rm -f "$tmp_list" 2>/dev/null
       return 1
     fi
-  done < <(unzip -Z1 "$archive" 2>/dev/null || unzip -l "$archive" 2>/dev/null | awk 'NR>3 {for (i=4; i<=NF; i++) printf "%s%s", $i, (i==NF?ORS:OFS)}')
+  done < "$tmp_list"
+
+  rm -f "$tmp_list" 2>/dev/null
   return 0
 }
 
 validate_tar_archive(){
   local archive="$1"
   [ -f "$archive" ] || return 1
+  [ -s "$archive" ] || return 1
+
+  local py_rc=0
+  _rth_validate_archive_python "$archive" "tar"
+  py_rc=$?
+  if [ "$py_rc" -eq 0 ]; then return 0; fi
+  if [ "$py_rc" -eq 1 ]; then return 1; fi
+
+  command -v tar >/dev/null 2>&1 || return 1
+  local tmp_list; tmp_list="$(mktemp 2>/dev/null || echo "${archive}.list.$$")"
+
+  if ! tar -tvf "$archive" > "$tmp_list" 2>/dev/null || [ ! -s "$tmp_list" ]; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_tar_archive: tar archive kharab ya gheyre-ghabel-e baz kardan ast"
+    return 1
+  fi
+
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      l*|c*|b*|p*)
+        err "validate_tar_archive: special file/symlink dar tar mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+      *" -> "*)
+        err "validate_tar_archive: symlink/hardlink target dar tar mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+      *" link to "*)
+        err "validate_tar_archive: hardlink dar tar mojaz nist: $line"
+        rm -f "$tmp_list" 2>/dev/null
+        return 1
+        ;;
+    esac
+  done < "$tmp_list"
+
+  if ! tar -tf "$archive" > "$tmp_list" 2>/dev/null || [ ! -s "$tmp_list" ]; then
+    rm -f "$tmp_list" 2>/dev/null
+    err "validate_tar_archive: tar -tf shekast khord"
+    return 1
+  fi
+
   local entry
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in
       /*|[A-Za-z]:*)
         err "validate_tar_archive: masir-e motlagh dar tar mojaz nist: $entry"
+        rm -f "$tmp_list" 2>/dev/null
         return 1
         ;;
     esac
     if echo "$entry" | grep -qE '(^|/|\\)\.\.(/|\\|$)'; then
       err "validate_tar_archive: path traversal (..) dar tar mojaz nist: $entry"
+      rm -f "$tmp_list" 2>/dev/null
       return 1
     fi
-  done < <(tar -tf "$archive" 2>/dev/null)
+  done < "$tmp_list"
+
+  rm -f "$tmp_list" 2>/dev/null
   return 0
 }
 
@@ -415,6 +609,10 @@ main(){
     cp "$SRC_FILE" "$bundle"
   else
     download "$BUNDLE_URL" "$bundle" || die "download shekast khord (link/shbkh/filtr ra barresi kon)."
+  fi
+  [ -s "$bundle" ] || die "baste khali ast (0 byte)."
+  if [ -n "${EXPECTED_SHA256:-}" ]; then
+    verify_sha256 "$bundle" "$EXPECTED_SHA256" || die "taiid-e checksum shekast khord (fail-closed)."
   fi
   log "hajm baste: $(du -h "$bundle" | cut -f1)"
 
