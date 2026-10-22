@@ -195,9 +195,15 @@ snapshot_now(){ # $@ = naghsh-ha ; khorooji: masir-e snapshot dir (rooye stdout 
   # list-e masir-haye mojood
   mapfile -t paths < <(snapshot_paths "$@")
   if [ "${#paths[@]}" -eq 0 ]; then
-    warn "hich file-e ghabel-e backup peyda nashod (nasb-e naghes?)." >&2
-    rmdir "$dir" 2>/dev/null || true
-    echo ""; return 0
+    if [ "$AUTO_ROLLBACK" -eq 1 ]; then
+      err "hich file-e ghabel-e backup peyda nashod (nasb-e naghes?). update ba rollback-e faal motevaghef shod." >&2
+      rmdir "$dir" 2>/dev/null || true
+      echo ""; return 1
+    else
+      warn "hich file-e ghabel-e backup peyda nashod (--no-rollback faal ast; edame bedoon snapshot)." >&2
+      rmdir "$dir" 2>/dev/null || true
+      echo ""; return 0
+    fi
   fi
   # manifest
   {
@@ -281,20 +287,59 @@ health_check(){ # $@ = naghsh-ha ; return 0 = salem, 1 = kharab
   return "$bad"
 }
 
+validate_tar_archive(){
+  local archive="$1"
+  [ -f "$archive" ] || return 1
+  local entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      /*|[A-Za-z]:*)
+        err "validate_tar_archive: masir-e motlagh dar archive mojaz nist: $entry"
+        return 1
+        ;;
+    esac
+    if echo "$entry" | grep -qE '(^|/|\\)\.\.(/|\\|$)'; then
+      err "validate_tar_archive: path traversal (..) dar archive mojaz nist: $entry"
+      return 1
+    fi
+  done < <(tar -tf "$archive" 2>/dev/null)
+  return 0
+}
+
 # ---------- restart-e service-haye har naghsh (baad az rollback) ----------
 restart_services(){
-  local role
+  local role bad=0
   for role in "$@"; do
     case "$role" in
-      panel) systemctl restart rathole-server 2>/dev/null || true
-             systemctl list-unit-files 2>/dev/null | grep -q '^rathole-noise\.service' && systemctl restart rathole-noise 2>/dev/null || true
-             systemctl list-unit-files 2>/dev/null | grep -q '^rathole-backhaul-server\.service' && systemctl restart rathole-backhaul-server 2>/dev/null || true
-             command -v nginx >/dev/null 2>&1 && { nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true; }; } ;;
-      node) systemctl restart rathole-client 2>/dev/null || true
-            systemctl list-unit-files 2>/dev/null | grep -q '^rathole-backhaul-client\.service' && systemctl restart rathole-backhaul-client 2>/dev/null || true ;;
-      hub)  systemctl restart ratholehub 2>/dev/null || true ;;
+      panel)
+        systemctl restart rathole-server 2>/dev/null || bad=1
+        if systemctl list-unit-files 2>/dev/null | grep -q '^rathole-noise\.service'; then
+          systemctl restart rathole-noise 2>/dev/null || bad=1
+        fi
+        if systemctl list-unit-files 2>/dev/null | grep -q '^rathole-backhaul-server\.service'; then
+          systemctl restart rathole-backhaul-server 2>/dev/null || bad=1
+        fi
+        if command -v nginx >/dev/null 2>&1; then
+          if nginx -t >/dev/null 2>&1; then
+            systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || bad=1
+          else
+            bad=1
+          fi
+        fi
+        ;;
+      node)
+        systemctl restart rathole-client 2>/dev/null || bad=1
+        if systemctl list-unit-files 2>/dev/null | grep -q '^rathole-backhaul-client\.service'; then
+          systemctl restart rathole-backhaul-client 2>/dev/null || bad=1
+        fi
+        ;;
+      hub)
+        systemctl restart ratholehub 2>/dev/null || bad=1
+        ;;
     esac
   done
+  return "$bad"
 }
 
 # ---------- rollback be yek snapshot ----------
@@ -304,13 +349,13 @@ rollback_to(){ # $1 = masir-e snapshot dir
   [ -f "$dir/backup.tar.gz" ] || die "file-e backup.tar.gz dar snapshot nist: $dir"
   local roles; roles="$(sed -n 's/^roles=//p' "$dir/manifest.txt" 2>/dev/null)"
   warn "rollback be snapshot: $(basename "$dir")  (roles: ${roles:-?})"
-  if tar -tzf "$dir/backup.tar.gz" | grep -E '(^/|\.\.)'; then
+  if ! validate_tar_archive "$dir/backup.tar.gz"; then
     die "tar archive daraye masirhaye khatarnak (absolute ya ..) ast."
   fi
-  tar -xzf "$dir/backup.tar.gz" -C / || die "estekhraj-e backup shekast khord."
+  tar --no-same-owner -xzf "$dir/backup.tar.gz" -C / || die "estekhraj-e backup shekast khord."
   systemctl daemon-reload 2>/dev/null || true
   # shellcheck disable=SC2086
-  restart_services ${roles:-}
+  restart_services ${roles:-} || warn "baazi az serviceha baad az rollback restart nashodand."
   sleep 1
   # shellcheck disable=SC2086
   if health_check ${roles:-}; then
@@ -528,7 +573,7 @@ else
       die "update kharab bود va rollback-e khodkar ham natoanest salem konad. dasti: sudo bash update.sh --rollback $(basename "$SNAP_DIR" | sed 's/^pre-update-//')"
     fi
   else
-    warn "rollback-e khodkar khamoosh ast (ya snapshot naboud). baraye bazgasht: sudo bash update.sh --rollback"
+    die "health-check baad az update shekast khord va rollback khamoosh ast (ya snapshot nabood); log-ha ra barresi kon."
   fi
 fi
 

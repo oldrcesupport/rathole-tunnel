@@ -7,20 +7,160 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name to release (e.g. v1.8.4)'
+        description: 'Tag name to release (e.g. v1.8.5)'
         required: true
-        default: 'v1.8.4'
+        default: 'v1.8.5'
 
 permissions:
   contents: write
 
 jobs:
+  validate-tag:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.determine_tag.outputs.tag }}
+    steps:
+      - name: Determine and validate release tag
+        id: determine_tag
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          echo "Target tag: $TAG"
+          # Validate tag format vX.Y.Z
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Invalid release tag format: $TAG. Expected format vX.Y.Z"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  shell-syntax:
+    name: Shell Syntax Gate
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.release_tag }}
+
+      - name: Verify shell syntax (bash -n)
+        run: |
+          set -e
+          echo "Checking root shell scripts..."
+          for f in bootstrap.sh install.sh install-node.sh install-panel.sh; do
+            if [ -f "$f" ]; then
+              echo "Checking $f..."
+              bash -n "$f"
+            fi
+          done
+
+          echo "Checking package shell scripts and CLIs..."
+          cd rathole-manager/rathole-manager
+          for f in *.sh ratholectl ratholenode; do
+            if [ -f "$f" ]; then
+              echo "Checking $f..."
+              bash -n "$f"
+            fi
+          done
+
+  python-tests:
+    name: Python Unit Tests Gate
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.release_tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax check Python files
+        run: |
+          python -m py_compile rathole-manager/rathole-manager/ratholehub/hub.py
+          python -m py_compile rathole-manager/rathole-manager/ratholehub/hubcmds.py
+          python -m py_compile tests/test_hub.py
+
+      - name: Run Python unit tests
+        run: |
+          python -m unittest discover -s tests -v
+
+  test-harness:
+    name: Test Harness Gate
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.release_tag }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl openssl
+
+      - name: Run Test Harness
+        run: |
+          chmod +x rathole-manager/rathole-manager/test-harness.sh
+          chmod +x rathole-manager/rathole-manager/ratholectl
+          chmod +x rathole-manager/rathole-manager/ratholenode
+          ./rathole-manager/rathole-manager/test-harness.sh
+
+  verify-package:
+    name: Package & Checksum Gate
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.release_tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify MANAGER_VERSION alignment
+        run: |
+          RELEASE_TAG="${{ needs.validate-tag.outputs.release_tag }}"
+          CLEAN_TAG="${RELEASE_TAG#v}"
+          source rathole-manager/rathole-manager/common.sh
+          echo "Release tag: $RELEASE_TAG (clean: $CLEAN_TAG), MANAGER_VERSION: $MANAGER_VERSION"
+          if [ "$CLEAN_TAG" != "$MANAGER_VERSION" ]; then
+            echo "::warning::Tag version ($CLEAN_TAG) differs from MANAGER_VERSION ($MANAGER_VERSION)"
+          fi
+
+      - name: Build package bundle
+        run: |
+          python scripts/package.py
+
+      - name: Generate and verify SHA256SUMS
+        run: |
+          sha256sum bootstrap.sh rathole-manager.zip install.sh > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
   release:
     name: Build & Publish Release
+    needs: [validate-tag, shell-syntax, python-tests, test-harness, verify-package]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.release_tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,20 +171,21 @@ jobs:
         run: |
           python scripts/package.py
 
-      - name: Generate SHA256SUMS
+      - name: Generate and verify SHA256SUMS
         run: |
           sha256sum bootstrap.sh rathole-manager.zip install.sh > SHA256SUMS
           cat SHA256SUMS
+          sha256sum -c SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || inputs.tag_name }}
-          name: ${{ github.ref_name || inputs.tag_name }} — Stable Production Release
+          tag_name: ${{ needs.validate-tag.outputs.release_tag }}
+          name: ${{ needs.validate-tag.outputs.release_tag }} — Stable Production Release
           body: |
             ## 🚀 Rathole Tunnel Manager Production Release
             
-            نسخه پایدار و نهایی سیستم جامع تانل معکوس ضدتحریم و گیمینگ Rathole Manager همراه با رفع کامل ممیزی‌های امنیتی.
+            نسخه پایدار و ممیزی‌شده سیستم جامع تانل معکوس ضدتحریم و گیمینگ Rathole Manager همراه با رفع کامل ممیزی‌های امنیتی.
 
             ### 📦 نحوه نصب سریع تک‌خطی (Quick Install):
             

@@ -22,6 +22,7 @@ umask 077
 STATE="/etc/rathole-manager/state.json"
 SERVER_TOML="/etc/rathole/server.toml"
 NOISE_TOML="/etc/rathole/noise-server.toml"
+NGINX_MAIN_CONF="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
 NGINX_CONF="/etc/nginx/conf.d/rathole.conf"
 STREAM_CONF="/etc/nginx/stream.d/rathole-stream.conf"
 RATHOLE_SVC="rathole-server"
@@ -1183,8 +1184,8 @@ NGINX2
   mv "$NGINX_CONF.tmp" "$out"
   # halat SNI/game: agar service game (sni) darim, stream rooye 443 va http rooye port dakhli
   if [ "$sni_count" -gt 0 ]; then
-    ensure_stream_include
-    gen_stream_conf "$internal"
+    ensure_stream_include || return 1
+    gen_stream_conf "$internal" || return 1
   else
     rm -f "$STREAM_CONF" 2>/dev/null
   fi
@@ -1193,7 +1194,7 @@ NGINX2
 # tvlid config stream (SNI → node passthrough; default → http dakhli)
 gen_stream_conf(){
   local internal="$1"
-  mkdir -p "$(dirname "$STREAM_CONF")"
+  mkdir -p "$(dirname "$STREAM_CONF")" || { err "sakht-e directory-e stream conf shekast khord."; return 1; }
   {
     echo "# tvlid khodkar tvst ratholectl — stream/SNI (servicehaye game)"
     echo "map \$ssl_preread_server_name \$rh_stream_backend {"
@@ -1228,19 +1229,25 @@ regenerate(){
     [ -f "$out" ] && { pre_http_bak="$(rth_mktemp)"; cp -a "$out" "$pre_http_bak"; }
     [ -f "$STREAM_CONF" ] && { pre_stream_bak="$(rth_mktemp)"; cp -a "$STREAM_CONF" "$pre_stream_bak"; }
   fi
-  gen_server_toml
-  gen_nginx_conf
+  gen_server_toml || return 1
+  gen_nginx_conf || return 1
   log "configha tvlid shdnd ($SERVER_TOML , $out)."
+  local regen_rc=0
   if command -v nginx >/dev/null 2>&1; then
-    if nginx -t 2>/tmp/nginx_test.log; then
-      systemctl reload nginx || systemctl restart nginx
-      log "nginx reload shod."
-      cp -a "$out" "$out.rathole-good.bak" 2>/dev/null || true
-      [ -f "$STREAM_CONF" ] && cp -a "$STREAM_CONF" "$STREAM_CONF.rathole-good.bak" 2>/dev/null || true
-      # agar stream hazf shode (bedoon SNI), backup-e bayat ra ham pak kon
-      [ -f "$STREAM_CONF" ] || rm -f "$STREAM_CONF.rathole-good.bak" 2>/dev/null
+    local test_log; test_log="$(rth_mktemp)"
+    if nginx -t 2>"$test_log"; then
+      if systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null; then
+        log "nginx reload shod."
+        cp -a "$out" "$out.rathole-good.bak" 2>/dev/null || true
+        [ -f "$STREAM_CONF" ] && cp -a "$STREAM_CONF" "$STREAM_CONF.rathole-good.bak" 2>/dev/null || true
+        # agar stream hazf shode (bedoon SNI), backup-e bayat ra ham pak kon
+        [ -f "$STREAM_CONF" ] || rm -f "$STREAM_CONF.rathole-good.bak" 2>/dev/null
+      else
+        err "reload va restart-e nginx shekast khord."
+        regen_rc=1
+      fi
     else
-      err "nginx -t khata dad; reload nashod:"; cat /tmp/nginx_test.log >&2
+      err "nginx -t khata dad; reload nashod:"; cat "$test_log" >&2
       # rollback-e har DO file (http + stream) be akharin halat-e known-good
       local restored=0
       if [ -n "$pre_http_bak" ] && [ -f "$pre_http_bak" ]; then cp -a "$pre_http_bak" "$out"; restored=1
@@ -1253,11 +1260,17 @@ regenerate(){
       fi
       if [ "$restored" -eq 1 ]; then
         err "config ghabli bazgardande shod (nginx salem mimanad)."
-        nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || true; }
+        if nginx -t >/dev/null 2>&1; then
+          systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+        else
+          err "HOSHDAR: config-e ghabli ham dar nginx -t khata dad; niyaz be barresi-ye dasti darad."
+        fi
       else
         err "hich config-e known-good baraye bazgardandan nabood; nginx dast-nakhorde mimanad."
       fi
+      regen_rc=1
     fi
+    rm -f "$test_log" 2>/dev/null
   fi
   rm -f "$pre_http_bak" "$pre_stream_bak" 2>/dev/null || true
   if systemctl is-active --quiet "$RATHOLE_SVC"; then
@@ -1292,6 +1305,7 @@ regenerate(){
         err "ntvanstm $BH_SVC ra restart knm."
     fi
   fi
+  [ "$regen_rc" -eq 0 ] || return "$regen_rc"
 }
 
 # ---------- chap dstvr nasb node ----------
@@ -1482,20 +1496,50 @@ cmd_show(){ ensure_state; print_node_install "${1:-}"; }
 ensure_stream_include(){
   local nc="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
   local sdir; sdir="$(dirname "$STREAM_CONF")"
-  mkdir -p "$sdir" 2>/dev/null || true
+  mkdir -p "$sdir" || { err "sakht-e directory-e stream conf ($sdir) shekast khord."; return 1; }
   [ -f "$nc" ] || return 0
   if command -v dpkg >/dev/null 2>&1 && ! dpkg -s libnginx-mod-stream >/dev/null 2>&1; then
-    apt-get update -qq 2>/dev/null && apt-get install -y -qq libnginx-mod-stream 2>/dev/null || true
+    if command -v apt-get >/dev/null 2>&1; then
+      log "nasb-e libnginx-mod-stream..."
+      if ! apt-get update -qq || ! apt-get install -y -qq libnginx-mod-stream; then
+        err "nasb-e libnginx-mod-stream shekast khord."
+        return 1
+      fi
+    fi
   fi
+  # Idempotent: already includes stream.d/*.conf
+  grep -qE 'include[[:space:]]+.+stream\.d/\*\.conf;' "$nc" 2>/dev/null && return 0
   grep -qE 'include[[:space:]]+.+stream\.d/\*\.conf' "$nc" 2>/dev/null && return 0
+
+  local bak="$nc.l4.bak"
+  cp -a "$nc" "$bak" || { err "sakht-e backup az $nc shekast khord."; return 1; }
+  chmod 600 "$bak" 2>/dev/null || true
+
+  local tmp; tmp="$(rth_mktemp "$(dirname "$nc")")" || { err "sakht-e file-e movaghat baraye $nc shekast khord."; return 1; }
+
   if grep -qE '^[[:space:]]*stream[[:space:]]*\{' "$nc"; then
-    warn "blak stream az ghabl dar nginx.conf hst. in kht ra dasti dakhlsh bgzar:"
-    warn "    include $sdir/*.conf;"
-    return 0
+    # Inject include inside existing stream { ... } block right after the opening brace
+    awk -v sdir="$sdir" '
+      /^[[:space:]]*stream[[:space:]]*\{/ {
+        print
+        print "    include " sdir "/*.conf;"
+        next
+      }
+      { print }
+    ' "$nc" > "$tmp" || { rm -f "$tmp"; err "ezafe kardan-e stream include be stream-e mojood shekast khord."; return 1; }
+  else
+    # Append stream { include ...; } block
+    cat "$nc" > "$tmp" || { rm -f "$tmp"; return 1; }
+    printf '\nstream {\n    include %s/*.conf;\n}\n' "$sdir" >> "$tmp" || { rm -f "$tmp"; return 1; }
   fi
-  cp -a "$nc" "$nc.l4.bak" 2>/dev/null || true
-  printf '\nstream {\n    include %s/*.conf;\n}\n' "$sdir" >> "$nc" 2>/dev/null || true
-  log "blak stream be nginx.conf ezafe shod (backup: $nc.l4.bak)."
+
+  if ! mv -f "$tmp" "$nc"; then
+    rm -f "$tmp"
+    err "jaigozini-e $nc shekast khord."
+    return 1
+  fi
+  log "include-e stream be $nc ezafe shod (backup: $bak)."
+  return 0
 }
 
 # ratholectl game add <name> <node_tls_inbound_port> <sni>
@@ -1518,18 +1562,23 @@ cmd_game_add(){
   echo "$name" | grep -qE '^[a-zA-Z0-9_-]+$' || die "name namotabar."
   is_reserved_name "$name" && die "name '$name' rezerv shode; name-e digari entekhab kon."
   echo "$inbound" | grep -qE '^[0-9]+$' || die "inbound bayad adad bashad."
+  is_valid_port "$inbound" || die "inbound bayad beyn 1 ta 65535 bashad: $inbound"
   # sni mostaghim daroon-e config-e nginx stream neveshte mishavad (gen_stream_conf);
   # hatman ba regex-e hostname mahdood shavad (ejaze-ye '*.' baraye wildcard) ta tzrigh nashavad.
   echo "$sni" | grep -qE '^(\*\.)?[A-Za-z0-9_.-]+$' || die "sni namotabar (faghat harf/adad/nghth/khttirh, ya '*.' baraye wildcard)."
   jq -e --arg n "$name" '.nodes[]|select(.name==$n)' "$STATE" >/dev/null && die "node '$name' vojood darad."
-  local dstart dport token node_json
+  local dstart dport token
   dstart="$(s_get '.data_port_start')"; dport="$(next_port port "$dstart")"; token="$(gen_token)"
-  node_json="$(jq -n --arg n "$name" --argjson p "$dport" --argjson ib "$inbound" --arg t "$token" --arg s "$sni" \
-     '{name:$n, port:$p, inbound_port:$ib, token:$t, sni:$s}')"
-  jq --argjson node "$node_json" '.nodes += [$node]' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+  rth_state_tx --arg n "$name" --argjson p "$dport" --argjson ib "$inbound" --arg t "$token" --arg s "$sni" \
+    '.nodes += [{name:$n, port:$p, inbound_port:$ib, token:$t, sni:$s}]' || die "afzoodan-e service game be state shekast khord."
   log "service game '$name' ezafe shod (SNI=$sni → data 127.0.0.1:$dport , node inbound :$inbound)."
   warn "443 hala stream/SNI shd; L7 fali rooye port dakhli mntghl shod (karbaran path dstnkhvrdh)."
-  regenerate
+  if ! regenerate; then
+    err "emal-e config baraye game '$name' shekast khord; rolling back state..."
+    rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))' 2>/dev/null || true
+    regenerate 2>/dev/null || true
+    die "regenerate shekast khord; amaliat rollback shod."
+  fi
   print_game_install "$name"
 }
 
@@ -1537,9 +1586,9 @@ cmd_game_rm(){
   local name="${1:-}"
   [ -n "$name" ] || die "estefade: ratholectl game rm <name>"
   jq -e --arg n "$name" '.nodes[]|select(.name==$n and .sni!=null)' "$STATE" >/dev/null || die "service game '$name' peyda nashod."
-  jq --arg n "$name" '.nodes |= map(select(.name!=$n))' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+  rth_state_tx --arg n "$name" '.nodes |= map(select(.name!=$n))' || die "hazf-e service game az state shekast khord."
   log "service game '$name' hazf shod."
-  regenerate
+  regenerate || die "hazf az state anjam shod ama regenerate ba khata movajeh shod."
 }
 
 cmd_game_ls(){
@@ -2247,9 +2296,16 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
       systemctl daemon-reload
-      systemctl enable ${PANEL_FAKEWEB_SVC} >/dev/null 2>&1
-      systemctl restart ${PANEL_FAKEWEB_SVC}
-      log "sait fik panel rooye 127.0.0.1:${port} bala amad (rfa 502 rooye /)."
+      systemctl enable ${PANEL_FAKEWEB_SVC} >/dev/null 2>&1 || true
+      if systemctl restart ${PANEL_FAKEWEB_SVC}; then
+        if systemctl is-active --quiet ${PANEL_FAKEWEB_SVC}; then
+          log "sait fik panel rooye 127.0.0.1:${port} bala amad (rfa 502 rooye /)."
+        else
+          die "service ${PANEL_FAKEWEB_SVC} restart shod vali active nist; journalctl -u ${PANEL_FAKEWEB_SVC} -n 30 --no-pager"
+        fi
+      else
+        die "restart-e ${PANEL_FAKEWEB_SVC} shekast khord; journalctl -u ${PANEL_FAKEWEB_SVC} -n 30 --no-pager"
+      fi
       ;;
     stop)   systemctl stop ${PANEL_FAKEWEB_SVC} 2>/dev/null && log "motevaghef shod." || warn "ejra naboodan." ;;
     rm)     systemctl disable --now ${PANEL_FAKEWEB_SVC} 2>/dev/null || true
@@ -2346,18 +2402,22 @@ cmd_hub(){
       port="${port:-${cur:-8088}}"
       if [ -n "$cur" ] && [ "$cur" != "$port" ]; then
         hub_set_listen_port "$port" || die "berooz-resani-ye $HUB_CONF shekast khord."
-        systemctl restart ratholehub 2>/dev/null || true
+        systemctl restart ratholehub || die "restart ratholehub shekast khord; log: journalctl -u ratholehub -n 30 --no-pager"
         log "listen_port-e hub avaz shod: $cur → $port (ratholehub restart shod)."
       fi
-      systemctl is-active --quiet ratholehub 2>/dev/null || systemctl start ratholehub 2>/dev/null || true
-      systemctl is-active --quiet ratholehub 2>/dev/null || warn "service ratholehub bala nayamad! bebin: journalctl -u ratholehub -n 30"
+      if ! systemctl is-active --quiet ratholehub; then
+        systemctl start ratholehub || die "start ratholehub shekast khord; log: journalctl -u ratholehub -n 30 --no-pager"
+      fi
+      if ! systemctl is-active --quiet ratholehub; then
+        die "service ratholehub bala nayamad! bebin: journalctl -u ratholehub -n 30 --no-pager"
+      fi
       state_set '.hub_port' "$port" num
       log "panel psht nginx faal shod: https://$(s_get '.domain')/$(hub_path_seg)/  →  127.0.0.1:$port"
       warn "panel hala amvmi ast; ramz ghvi rooye hab bgzar."
       regenerate
       ;;
     off)
-      local tmp; tmp="$(mktemp)"; jq 'del(.hub_port)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      rth_state_tx 'del(.hub_port)' || die "hazf-e hub_port az state shekast khord."
       log "panel az nginx hazf shod (location /$(hub_path_seg)/ brdashth shod)."
       if systemctl is-active --quiet ratholehub 2>/dev/null; then
         warn "service ratholehub hamchenan roshan ast (127.0.0.1; dstrsi fght ba SSH-forward). khamoosh: systemctl stop ratholehub"
@@ -2564,9 +2624,8 @@ cmd_noise(){
     off)
       # transport-e node-haye NOISE ra hazf kon (nabvdan = ws), service ra khamoosh kon, state-key-haye noise ra hazf kon.
       # faghat noise — vagarna node-haye backhaul ham bi-seda be ws bar migardand.
-      local tmp; tmp="$(mktemp)"
-      jq '(.nodes[] | select(.transport == "noise")) |= del(.transport)
-          | del(.noise_port,.noise_pattern,.noise_privkey,.noise_pubkey)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      rth_state_tx '(.nodes[] | select(.transport == "noise")) |= del(.transport)
+          | del(.noise_port,.noise_pattern,.noise_privkey,.noise_pubkey)' || die "khamoosh kardan-e noise dar state shekast khord."
       systemctl disable --now "$NOISE_SVC" 2>/dev/null || true
       rm -f "$NOISE_UNIT"; systemctl daemon-reload 2>/dev/null || true
       rm -f "$NOISE_TOML"
@@ -2584,13 +2643,13 @@ cmd_noise(){
           # transport-e har node YEKI ast — node-e backhaul ra bi-seda switch nakon.
           local cur; cur="$(jq -r --arg n "$name" '.nodes[] | select(.name==$n) | .transport // "ws"' "$STATE" 2>/dev/null)"
           [ "$cur" = backhaul ] && die "node '$name' rooye core-e backhaul ast; aval 'ratholectl backhaul node $name off' ra bezan."
-          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "noise"' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "noise"' || die "tagheer-e transport-e node be noise shekast khord."
           log "node '$name' be masir-e noise montaghel shod."
           regenerate
           print_noise_connect "$name"
           ;;
         off)
-          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="noise")) |= del(.transport)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="noise")) |= del(.transport)' || die "bargasht-e transport-e node be ws shekast khord."
           log "node '$name' be masir-e ws/443 bargasht."
           regenerate
           ;;
@@ -2720,9 +2779,8 @@ cmd_backhaul(){
       ;;
     off)
       # node-haye backhaul be transport-e pishfarz (ws az nginx/443) barmigardand — .transport hazf mishavad.
-      local tmp; tmp="$(mktemp)"
-      jq '(.nodes[] | select(.transport == "backhaul")) |= del(.transport)
-          | del(.backhaul_port,.backhaul_transport,.backhaul_token,.backhaul_profile,.backhaul_exposure)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      rth_state_tx '(.nodes[] | select(.transport == "backhaul")) |= del(.transport)
+          | del(.backhaul_port,.backhaul_transport,.backhaul_token,.backhaul_profile,.backhaul_exposure)' || die "khamoosh kardan-e backhaul dar state shekast khord."
       systemctl disable --now "$BH_SVC" 2>/dev/null || true
       rm -f "$BH_UNIT"; systemctl daemon-reload 2>/dev/null || true
       rm -f "$BH_TOML"
@@ -2757,13 +2815,13 @@ cmd_backhaul(){
             err "do mashin ba yek token → har DO tunnel ghat mishavad."
             die "baraye in node az rathole estefade kon (ws/kcp/plain/noise)، ya aval '${clash}' ra backhaul off kon."
           fi
-          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "backhaul"' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n) | .transport) |= "backhaul"' || die "tagheer-e transport-e node be backhaul shekast khord."
           log "node '$name' be backhaul switch shod (az rathole-server kharej shod)."
           regenerate
           print_backhaul_connect
           ;;
         off)
-          local tmp; tmp="$(mktemp)"; jq --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="backhaul")) |= del(.transport)' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+          rth_state_tx --arg n "$name" '(.nodes[] | select(.name==$n and .transport=="backhaul")) |= del(.transport)' || die "bargasht-e transport-e node be ws shekast khord."
           log "node '$name' be transport-e pishfarz (ws az nginx/443) bargasht."
           regenerate
           ;;
@@ -2820,9 +2878,8 @@ cmd_proxy(){
         && die "esm '$name' motealegh be yek node ast (har do dar map-e /<name> mineshinand)."
       jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
         && die "reverse-proxy '$name' az ghabl vojood darad."
-      local tmp; tmp="$(mktemp)"
-      jq --arg n "$name" --arg u "$up" \
-         '.proxies = ((.proxies // []) + [{name:$n, upstream:$u}])' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      rth_state_tx --arg n "$name" --arg u "$up" \
+         '.proxies = ((.proxies // []) + [{name:$n, upstream:$u}])' || die "afzoodan-e reverse-proxy be state shekast khord."
       log "reverse-proxy ezafe shod: /${name}/ → ${up}"
       regenerate
       local domain; domain="$(s_get '.domain')"
@@ -2833,8 +2890,7 @@ cmd_proxy(){
       [ -n "$name" ] || die "estefade: ratholectl proxy rm <name>"
       jq -e --arg n "$name" '(.proxies // [])[]|select(.name==$n)' "$STATE" >/dev/null 2>&1 \
         || die "reverse-proxy '$name' peyda nashod."
-      local tmp; tmp="$(mktemp)"
-      jq --arg n "$name" '.proxies = ((.proxies // []) | map(select(.name != $n)))' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+      rth_state_tx --arg n "$name" '.proxies = ((.proxies // []) | map(select(.name != $n)))' || die "hazf-e reverse-proxy az state shekast khord."
       log "reverse-proxy hazf shod: $name"
       regenerate
       ;;
@@ -3271,8 +3327,30 @@ main(){
 
     control-path) cmd_control_path "${1:-show}" "$@" ;;
     game)   cmd_game "$@" ;;
-    restart) need_root; systemctl restart "$RATHOLE_SVC" && log "$RATHOLE_SVC restart shod (hame tunnelha lhzhai ghat shdnd)." ;;
-    enable) need_root; systemctl enable --now "$RATHOLE_SVC"; log "$RATHOLE_SVC faal shod." ;;
+    restart)
+      need_root
+      if systemctl restart "$RATHOLE_SVC"; then
+        if systemctl is-active --quiet "$RATHOLE_SVC"; then
+          log "$RATHOLE_SVC restart shod (hame tunnelha lhzhai ghat shdnd)."
+        else
+          die "$RATHOLE_SVC restart shod ama active nist; log: journalctl -u $RATHOLE_SVC -n 30 --no-pager"
+        fi
+      else
+        die "restart-e $RATHOLE_SVC shekast khord; log: journalctl -u $RATHOLE_SVC -n 30 --no-pager"
+      fi
+      ;;
+    enable)
+      need_root
+      if systemctl enable --now "$RATHOLE_SVC"; then
+        if systemctl is-active --quiet "$RATHOLE_SVC"; then
+          log "$RATHOLE_SVC faal shod."
+        else
+          die "$RATHOLE_SVC enable shod ama active nist; log: journalctl -u $RATHOLE_SVC -n 30 --no-pager"
+        fi
+      else
+        die "enable-e $RATHOLE_SVC shekast khord; log: journalctl -u $RATHOLE_SVC -n 30 --no-pager"
+      fi
+      ;;
     update) cmd_update "${1:-}" ;;
     version|--version|-V) print_version panel ;;
     menu)   menu ;;
@@ -3293,27 +3371,45 @@ main(){
 # fallback-e mkdir baraye sistem-haye bedoon-e flock (hamsan-e rth_commit_config).
 RTH_LOCK="${RTH_LOCK:-/run/ratholectl.lock}"
 rth_with_lock(){
-  mkdir -p "$(dirname "$RTH_LOCK")" 2>/dev/null || RTH_LOCK="/tmp/ratholectl.lock"
-  local timeout_sec="${RTH_LOCK_TIMEOUT:-30}"
-  if command -v flock >/dev/null 2>&1; then
-    # BEHRANI: `exec 9>file 2>/dev/null` (bedoon-e command) redirect ra DAEMI mikonad —
-    # yaani stderr-e KOL-e process ta akhar be /dev/null miraft va HAMEYE payam-haye
-    # err/die BI-SEDA gom mishodand (masalan rahnama-ye «--domain bede» dar init: karbar
-    # faghat «init shekast khord» ra midid). ba group، 2>/dev/null faghat baraye hamin
-    # exec eemal mishavad va fd 9 ham hamchenan set mishavad.
-    { exec 9>"$RTH_LOCK"; } 2>/dev/null || { "$@"; return $?; }
-    if flock -w "$timeout_sec" 9; then
-      RTH_LOCK_HELD=1
+  local lockdir; lockdir="$(dirname "$RTH_LOCK")"
+  if ! mkdir -p "$lockdir" 2>/dev/null && [ ! -d "$lockdir" ]; then
+    local uid; uid="$(id -u 2>/dev/null || echo 0)"
+    local udir="${TMPDIR:-/tmp}/rth-run-${uid}"
+    mkdir -m 700 -p "$udir" 2>/dev/null || true
+    if [ -d "$udir" ] && [ -O "$udir" ] && [ ! -L "$udir" ]; then
+      RTH_LOCK="${udir}/ratholectl.lock"
+      lockdir="$udir"
     else
+      err "nemitoonam directory-e ghofl ra besazam: $lockdir (fail-closed)."
+      return 1
+    fi
+  fi
+
+  local timeout_sec="${RTH_LOCK_TIMEOUT:-30}"
+  case "$timeout_sec" in
+    ''|*[!0-9]*) timeout_sec=30 ;;
+    *) [ "$timeout_sec" -gt 0 ] 2>/dev/null || timeout_sec=30 ;;
+  esac
+
+  if command -v flock >/dev/null 2>&1; then
+    # BEHRANI: agar baz kardan fd 9 shekast bokhorad, bayad FAIL-CLOSED konad, na inke "$@" bedoon ghofl ejra shavad!
+    if ! { exec 9>"$RTH_LOCK"; } 2>/dev/null; then
+      err "baz kardan-e file-e ghofl shekast khord: $RTH_LOCK; amaliat baraye jelogiri az race condition motavaghef shod."
+      return 1
+    fi
+    if ! flock -w "$timeout_sec" 9; then
       err "ghofl-e state azad nashod (flock timeout ${timeout_sec}s); amaliat baraye jelogiri az race condition motavaghef shod."
       exec 9>&-
       return 1
     fi
-    "$@"; local rc=$?
+    RTH_LOCK_HELD=1
+    local rc=0
+    "$@" || rc=$?
     RTH_LOCK_HELD=0
     exec 9>&-
     return $rc
   fi
+
   local d="${RTH_LOCK}.d" i=0 held=0
   local max_tries=$((timeout_sec * 10))
   [ "$max_tries" -ge 1 ] 2>/dev/null || max_tries=1
@@ -3322,10 +3418,13 @@ rth_with_lock(){
     i=$((i+1)); sleep 0.1 2>/dev/null || sleep 1
   done
   if [ "$held" -ne 1 ]; then
-    err "ghofl-e state azad nashod (mkdir timeout); amaliat baraye jelogiri az race condition motavaghef shod."
+    err "ghofl-e state azad nashod (mkdir timeout ${timeout_sec}s); amaliat baraye jelogiri az race condition motavaghef shod."
     return 1
   fi
-  "$@"; local rc=$?
+  RTH_LOCK_HELD=1
+  local rc=0
+  "$@" || rc=$?
+  RTH_LOCK_HELD=0
   rmdir "$d" 2>/dev/null
   return $rc
 }

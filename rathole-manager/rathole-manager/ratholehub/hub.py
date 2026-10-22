@@ -126,30 +126,98 @@ def redact_cmd(cmd):
     if not cmd:
         return ""
     if isinstance(cmd, str):
-        words = shlex.split(cmd) if " " in cmd else [cmd]
+        try:
+            words = shlex.split(cmd) if " " in cmd else [cmd]
+        except Exception:
+            words = cmd.split()
     elif isinstance(cmd, (list, tuple)):
         words = [str(x) for x in cmd]
     else:
         words = [str(cmd)]
 
     redacted = list(words)
-    if len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "add-svc":
-        redacted[3] = "***REDACTED***"
-    elif len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "kcp" and redacted[2] == "on":
-        redacted[4] = "***REDACTED***"
-    elif len(redacted) >= 7 and redacted[0] == "ratholenode" and redacted[1] == "upstream" and redacted[2] == "kcp" and redacted[4] == "on":
-        redacted[6] = "***REDACTED***"
-    elif len(redacted) >= 7 and redacted[0] == "ratholenode" and redacted[1] == "upstream" and redacted[2] == "add-svc":
-        redacted[5] = "***REDACTED***"
-    elif len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "backhaul" and redacted[2] == "on":
-        redacted[4] = "***REDACTED***"
-    elif len(redacted) >= 5 and redacted[0] == "ratholenode" and redacted[1] == "noise" and redacted[2] == "on":
-        redacted[4] = "***REDACTED***"
 
-    for i in range(len(redacted) - 1):
-        prev = redacted[i].lower()
-        if prev in ("--password", "--token", "--key", "-key", "-p"):
+    # 1. Positional command-line secret redaction
+    # Skip any leading wrapper commands (sudo, env, etc.)
+    idx = 0
+    while idx < len(redacted) and redacted[idx] in ("sudo", "env", "bash", "sh"):
+        idx += 1
+
+    if idx < len(redacted):
+        bin_name = os.path.basename(redacted[idx])
+        sub = redacted[idx + 1:]
+        if bin_name == "ratholenode":
+            # ratholenode add-svc <name> <token> <inbound>
+            if len(sub) >= 3 and sub[0] == "add-svc":
+                redacted[idx + 3] = "***REDACTED***"
+            # ratholenode kcp on <remote> <key> [profile]
+            elif len(sub) >= 4 and sub[0] == "kcp" and sub[1] == "on":
+                redacted[idx + 4] = "***REDACTED***"
+            # ratholenode backhaul on <remote> <token>
+            elif len(sub) >= 4 and sub[0] == "backhaul" and sub[1] == "on":
+                redacted[idx + 4] = "***REDACTED***"
+            # ratholenode noise on <target> <pubkey>
+            elif len(sub) >= 4 and sub[0] == "noise" and sub[1] == "on":
+                redacted[idx + 4] = "***REDACTED***"
+            # ratholenode upstream add-svc <id> <name> <token> <inbound>
+            elif len(sub) >= 5 and sub[0] == "upstream" and sub[1] == "add-svc":
+                redacted[idx + 5] = "***REDACTED***"
+            # ratholenode upstream kcp on <id> <remote> <key>
+            elif len(sub) >= 6 and sub[0] == "upstream" and sub[1] == "kcp" and sub[2] == "on":
+                redacted[idx + 6] = "***REDACTED***"
+            # ratholenode upstream noise on <id> <target> <key>
+            elif len(sub) >= 6 and sub[0] == "upstream" and sub[1] == "noise" and sub[2] == "on":
+                redacted[idx + 6] = "***REDACTED***"
+        elif bin_name == "ratholectl":
+            # ratholectl add <name> [port] [token]
+            if len(sub) >= 4 and sub[0] == "add":
+                redacted[idx + 4] = "***REDACTED***"
+            # ratholectl token rotate <name> [new_token]
+            elif len(sub) >= 4 and sub[0] == "token" and sub[1] == "rotate":
+                redacted[idx + 4] = "***REDACTED***"
+            # ratholectl kcp on [port] [profile] [key]
+            elif len(sub) >= 5 and sub[0] == "kcp" and sub[1] == "on":
+                redacted[idx + 5] = "***REDACTED***"
+            # ratholectl noise on [key]
+            elif len(sub) >= 3 and sub[0] == "noise" and sub[1] == "on":
+                redacted[idx + 3] = "***REDACTED***"
+            # ratholectl backhaul on [token]
+            elif len(sub) >= 3 and sub[0] == "backhaul" and sub[1] == "on":
+                redacted[idx + 3] = "***REDACTED***"
+
+    # 2. Flag-based and key=value secret redaction
+    SECRET_FLAGS = {
+        "--password", "--pass", "-p",
+        "--token", "--api-token", "--auth-token",
+        "--key", "-key", "--secret",
+        "--privkey", "--private-key", "--cert-key"
+    }
+
+    for i in range(len(redacted)):
+        item = redacted[i]
+        item_lower = item.lower()
+
+        # Flag followed by secret in next argument: --token SECRET
+        if item_lower in SECRET_FLAGS and i + 1 < len(redacted):
             redacted[i + 1] = "***REDACTED***"
+
+        # Flag with equals: --token=SECRET or --key=SECRET
+        for sf in SECRET_FLAGS:
+            if item_lower.startswith(sf + "="):
+                flag_part = item[:len(sf) + 1]
+                redacted[i] = flag_part + "***REDACTED***"
+                break
+
+        # -pSECRET pattern
+        if item.startswith("-p") and len(item) > 2 and not item.startswith("-p="):
+            redacted[i] = "-p***REDACTED***"
+
+        # ENV variable assignments: TOKEN=SECRET or KEY=SECRET
+        if "=" in item and not item.startswith("-"):
+            var, _, _ = item.partition("=")
+            var_upper = var.upper()
+            if any(s in var_upper for s in ("TOKEN", "KEY", "SECRET", "PASSWORD", "PASS")):
+                redacted[i] = f"{var}=***REDACTED***"
 
     return " ".join(shlex.quote(w) if (" " in w or not w) else w for w in redacted)
 
@@ -166,17 +234,32 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    with open(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    dir_name = os.path.dirname(path)
+    if dir_name:
+        os.makedirs(dir_name, mode=0o700, exist_ok=True)
+    pid = os.getpid()
+    tid = threading.get_ident()
+    rnd = secrets.token_hex(4)
+    tmp = f"{path}.tmp.{pid}.{tid}.{rnd}"
     try:
-        os.chmod(path, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(tmp, flags, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
     except Exception:
-        pass
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        raise
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 def _strip_ansi(s):
@@ -259,7 +342,7 @@ def audit_log(user, server, action, cmd, rc):
             with open(fd, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception as e:
-        sys.stderr.write(f"[hub audit warning] {e}\n")
+        sys.stderr.write(f"[hub audit warning] Audit write failed: {type(e).__name__}\n")
 
 def read_audit(limit=100):
     try:
@@ -1102,7 +1185,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         p = path.replace("/hub", "", 1) if path.startswith("/hub/api") else path
         if p == "/api/login":
-            ip = self.headers.get("X-Real-IP") or (self.client_address[0] if self.client_address else "?")
+            ip = self._client_ip()
             if not login_allowed(ip):
                 return self._send(429, {"error": "too many attempts; try later"})
             data = self._body_json()
@@ -1179,6 +1262,21 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     # ---- helpers ----
+    def _client_ip(self):
+        peer_ip = self.client_address[0] if (self.client_address and len(self.client_address) > 0) else "127.0.0.1"
+        trusted_proxies = {"127.0.0.1", "::1", "localhost"}
+        try:
+            cfg = get_config()
+            if cfg and isinstance(cfg.get("trusted_proxies"), list):
+                trusted_proxies.update(cfg["trusted_proxies"])
+        except Exception:
+            pass
+        if peer_ip in trusted_proxies:
+            hdr = self.headers.get("X-Real-IP") or self.headers.get("X-Forwarded-For")
+            if hdr:
+                return hdr.split(",")[0].strip()
+        return peer_ip
+
     def _find(self, name):
         for s in get_inventory():
             if s.get("name") == name:
@@ -1186,8 +1284,8 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _user(self):
-        # hvite tghribi baraye audit: IP klaint (psht nginx, X-Real-IP).
-        return self.headers.get("X-Real-IP") or (self.client_address[0] if self.client_address else "?")
+        # hvite tghribi baraye audit: IP klaint (psht nginx, X-Real-IP faghat az trusted proxy).
+        return self._client_ip()
 
     def _add_server(self, d):
         name = str(d.get("name", "")); role = str(d.get("role", ""))

@@ -104,21 +104,31 @@ rth_commit_config(){
   local src="$1" dst="$2" lock="${2}.lock"
   [ -s "$src" ] || { err "config-e jadid khali ast: $src"; return 1; }
   local dir; dir="$(dirname "$dst")"
-  mkdir -p "$dir"
+  mkdir -p "$dir" || { err "nemitoonam directory-e config ra besazam: $dir"; return 1; }
   chmod 700 "$dir" 2>/dev/null || true
   local tmp="${dst}.tmp.$$"
   cp -f "$src" "$tmp" 2>/dev/null || cat "$src" > "$tmp" || { err "sakht-e config-e staging shekast khord: $tmp"; rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
 
   if _rth_has_flock; then
+    local lock_rc=0
     (
-      flock -x -w 30 9 || exit 1
-      mv -f "$tmp" "$dst"
-    ) 9>"$lock" || {
-      err "ghofl-e config azad nashod (flock timeout 30s); amaliat motavaghef shod."
+      flock -x -w 30 9 || exit 2
+      mv -f "$tmp" "$dst" || exit 3
+    ) 9>"$lock" || lock_rc=$?
+    if [ "$lock_rc" -eq 2 ]; then
+      err "ghofl-e config azad nashod (flock timeout 30s): $dst"
       rm -f "$tmp"
       return 1
-    }
+    elif [ "$lock_rc" -eq 3 ]; then
+      err "jaye gozini-e config shekast khord (mv error): $dst"
+      rm -f "$tmp"
+      return 1
+    elif [ "$lock_rc" -ne 0 ]; then
+      err "baz kardan ya amaliat-e ghofl-e config shekast khord ($lock_rc): $lock"
+      rm -f "$tmp"
+      return 1
+    fi
   else
     local d="${dst}.lockd" i=0 held=0 rc=0
     while [ "$i" -lt 50 ]; do
@@ -132,7 +142,11 @@ rth_commit_config(){
     fi
     mv -f "$tmp" "$dst" || rc=1
     rmdir "$d" 2>/dev/null
-    [ "$rc" -eq 0 ] || { rm -f "$tmp"; return 1; }
+    if [ "$rc" -ne 0 ]; then
+      err "jaye gozini-e config shekast khord (mv error): $dst"
+      rm -f "$tmp"
+      return 1
+    fi
   fi
   chmod 600 "$dst" 2>/dev/null || true
   rm -f "$src" "$tmp"

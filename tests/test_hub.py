@@ -90,9 +90,73 @@ class TestRedaction(unittest.TestCase):
         self.assertNotIn("mypass", redacted)
         self.assertIn("***REDACTED***", redacted)
 
+    def test_redact_extended_commands(self):
+        cases = [
+            ("sudo ratholenode add-svc node1 token_abc123 2087", "token_abc123"),
+            ("ratholenode upstream add-svc up1 node1 secret_tok 2087", "secret_tok"),
+            ("ratholenode upstream kcp on up1 1.2.3.4:443 secret_kcp_key", "secret_kcp_key"),
+            ("ratholenode backhaul on 1.2.3.4:443 secret_bh_token", "secret_bh_token"),
+            ("ratholenode noise on 1.2.3.4:443 secret_noise_key", "secret_noise_key"),
+            ("ratholectl add mynode 1001 my_secret_token", "my_secret_token"),
+            ("ratholectl token rotate mynode new_rotated_token", "new_rotated_token"),
+            ("ratholectl kcp on 443 balanced my_kcp_secret", "my_kcp_secret"),
+            ("ratholectl noise on noise_private_key_here", "noise_private_key_here"),
+            ("ratholectl backhaul on bh_secret_token_here", "bh_secret_token_here"),
+            ("curl https://example.com --token=secret_eq_tok --api-token=secret_api_tok", "secret_eq_tok"),
+            ("curl https://example.com --key=secret_key_val", "secret_key_val"),
+            ("mysql -u root -pMySecretDbPass", "MySecretDbPass"),
+            ("TOKEN=my_env_tok ratholectl status", "my_env_tok"),
+        ]
+        for cmd, secret in cases:
+            redacted = hub.redact_cmd(cmd)
+            self.assertNotIn(secret, redacted, f"Secret '{secret}' leaked in redacted output: {redacted}")
+            self.assertIn("***REDACTED***", redacted, f"Expected ***REDACTED*** in: {redacted}")
+
     def test_redact_empty_or_none(self):
         self.assertEqual(hub.redact_cmd(""), "")
         self.assertEqual(hub.redact_cmd(None), "")
+
+
+class TestClientIpAndSaveJson(unittest.TestCase):
+    def test_client_ip_anti_spoofing(self):
+        class DummyHandler:
+            def __init__(self, peer_ip, headers):
+                self.client_address = (peer_ip, 12345)
+                self.headers = headers
+            _client_ip = hub.Handler._client_ip
+
+        # Direct external connection with spoofed X-Real-IP header: MUST be ignored
+        ext_h = DummyHandler("203.0.113.195", {"X-Real-IP": "198.51.100.1"})
+        self.assertEqual(ext_h._client_ip(), "203.0.113.195")
+
+        # Trusted loopback connection with X-Real-IP header: trusted
+        proxy_h = DummyHandler("127.0.0.1", {"X-Real-IP": "198.51.100.1"})
+        self.assertEqual(proxy_h._client_ip(), "198.51.100.1")
+
+    def test_save_json_atomic_and_cleanup(self):
+        test_dir = tempfile.mkdtemp()
+        try:
+            target_file = os.path.join(test_dir, "data.json")
+            initial_data = {"version": 1}
+            hub.save_json(target_file, initial_data)
+            self.assertEqual(hub.load_json(target_file, {}), initial_data)
+
+            # Failure during serialization should not corrupt target file
+            class Unserializable:
+                pass
+
+            bad_data = {"bad": Unserializable()}
+            with self.assertRaises(Exception):
+                hub.save_json(target_file, bad_data)
+
+            # Target file must still be intact
+            self.assertEqual(hub.load_json(target_file, {}), initial_data)
+
+            # No temp files left behind
+            remaining = os.listdir(test_dir)
+            self.assertEqual(remaining, ["data.json"])
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
 
 
 class TestPasswordSecurity(unittest.TestCase):
