@@ -13,6 +13,8 @@ case "$(uname -s 2>/dev/null)" in
   *)                    ROOT="$(mktemp -d)" ;;
 esac
 trap 'rm -rf "$ROOT"' EXIT
+export RATHOLE_TEST_MODE=1
+export RTH_TEST_DIR="$ROOT"
 mkdir -p "$ROOT/bin" "$ROOT/etc/rathole" "$ROOT/etc/rathole-manager" "$ROOT/etc/nginx/conf.d" "$ROOT/etc/nginx/stream.d"
 cat > "$ROOT/etc/nginx/nginx.conf" <<'EOF'
 events {
@@ -61,6 +63,8 @@ sed \
   -e 's/\r$//' \
   "$BASE/ratholectl" > "$ROOT/ratholectl.lib"
 
+sed 's/\r$//' "$BASE/ratholenode" > "$ROOT/ratholenode.lib"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 assert_ok() {
@@ -92,12 +96,49 @@ set -uo pipefail
 export PATH="$ROOT/bin:\$PATH"
 # LIB_ONLY: jelo-ye ejra-ye main hangam-e source ra migirad
 export RATHOLECTL_LIB_ONLY=1
+export RATHOLE_TEST_MODE=1
+export RTH_TEST_DIR="$ROOT"
 export NGINX_MAIN_CONF="$ROOT/etc/nginx/nginx.conf"
 source "$ROOT/ratholectl.lib"
 # khnsisazi tavabe niazmnd system vaghai
 need_root(){ :; }
-nginx(){ return 0; }
-systemctl(){ return 0; }
+nginx(){
+  if [ "\${FAIL_NGINX_T_ONCE:-0}" = "1" ] && [ "\${1:-}" = "-t" ]; then
+    FAIL_NGINX_T_ONCE=0
+    return 1
+  fi
+  if [ "\${FAIL_NGINX_T:-0}" = "1" ] && [ "\${1:-}" = "-t" ]; then
+    return 1
+  fi
+  return 0
+}
+systemctl(){
+  if [ "\${SYSTEMCTL_NOT_FOUND:-0}" = "1" ]; then
+    return 127
+  fi
+  if [ "\${FAIL_SYSTEMCTL_RELOAD_ONCE:-0}" = "1" ]; then
+    if [ "\${1:-}" = "reload" ] || [ "\${1:-}" = "restart" ]; then
+      FAIL_SYSTEMCTL_RELOAD_ONCE=0
+      return 1
+    fi
+  fi
+  if [ "\${FAIL_SYSTEMCTL_RELOAD:-0}" = "1" ]; then
+    if [ "\${1:-}" = "reload" ] || [ "\${1:-}" = "restart" ]; then
+      return 1
+    fi
+  fi
+  if [ "\${FAIL_SYSTEMCTL_START:-0}" = "1" ]; then
+    if [ "\${1:-}" = "start" ]; then
+      return 1
+    fi
+  fi
+  if [ "\${FAIL_SYSTEMCTL_IS_ACTIVE:-0}" = "1" ]; then
+    if [ "\${1:-}" = "is-active" ]; then
+      return 1
+    fi
+  fi
+  return 0
+}
 dpkg(){ return 0; }
 apt-get(){ return 0; }
 certbot(){ return 0; }
@@ -106,6 +147,48 @@ scp(){ return 0; }
 "\$@"
 EOF
 chmod +x "$RUN"
+
+RUN_NODE="$ROOT/run_node.sh"
+cat > "$RUN_NODE" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+export PATH="$ROOT/bin:\$PATH"
+export RATHOLENODE_LIB_ONLY=1
+export RATHOLE_TEST_MODE=1
+export RTH_TEST_DIR="$ROOT"
+export UP_DIR="$ROOT/etc/rathole/upstreams"
+export UP_TOML_DIR="$ROOT/etc/rathole"
+export SYSTEMD_SYSTEM_DIR="$ROOT/etc/systemd/system"
+export ENV_FILE="$ROOT/etc/rathole/node.env"
+export SVC_FILE="$ROOT/etc/rathole/services.conf"
+export CLIENT_TOML="$ROOT/etc/rathole/client.toml"
+mkdir -p "$ROOT/etc/rathole/upstreams" "$ROOT/etc/systemd/system"
+source "$ROOT/ratholenode.lib"
+need_root(){ :; }
+systemctl(){
+  if [ "\${SYSTEMCTL_NOT_FOUND:-0}" = "1" ]; then
+    return 127
+  fi
+  if [ "\${FAIL_SYSTEMCTL_RELOAD:-0}" = "1" ]; then
+    if [ "\${1:-}" = "reload" ] || [ "\${1:-}" = "restart" ]; then
+      return 1
+    fi
+  fi
+  if [ "\${FAIL_SYSTEMCTL_START:-0}" = "1" ]; then
+    if [ "\${1:-}" = "start" ]; then
+      return 1
+    fi
+  fi
+  if [ "\${FAIL_SYSTEMCTL_IS_ACTIVE:-0}" = "1" ]; then
+    if [ "\${1:-}" = "is-active" ]; then
+      return 1
+    fi
+  fi
+  return 0
+}
+"\$@"
+EOF
+chmod +x "$RUN_NODE"
 
 line(){ echo "=============================================="; echo "$*"; echo "=============================================="; }
 
@@ -435,6 +518,179 @@ EOF
   exit 0
 )
 assert_ok $? "safe_kv_set va safe_kv_del ba carakterhaye khas movafagh bood"
+
+line "tst 26: upstream .env command injection rejection (Finding 2)"
+MARKER_26="$ROOT/injected_marker_26"
+rm -f "$MARKER_26"
+mkdir -p "$ROOT/etc/rathole/upstreams"
+cat > "$ROOT/etc/rathole/upstreams/inj01.env" <<EOF
+SERVER=1.2.3.4:1234
+HOST=evil.com; touch $MARKER_26
+TUNNEL=ws; touch $MARKER_26
+EOF
+bash "$RUN_NODE" gen_up_client inj01 >/dev/null 2>&1 || true
+[ ! -f "$MARKER_26" ]
+assert_ok $? "gen_up_client command injection ra ejra nakard (marker sakhte nashod)"
+grep -q 'remote_addr = "1.2.3.4:1234"' "$ROOT/etc/rathole/client-inj01.toml"
+assert_ok $? "client-inj01.toml ba maghadir-e safe tolid shod"
+
+cat > "$ROOT/etc/rathole/upstreams/inj02.env" <<EOF
+SERVER=\$(touch $MARKER_26)
+HOST=example.com
+TUNNEL=ws
+EOF
+bash "$RUN_NODE" gen_up_client inj02 >/dev/null 2>&1 || true
+[ ! -f "$MARKER_26" ]
+assert_ok $? "subshell substitution \$(...) dar .env ejra nashod"
+
+line "tst 27: strict upstream ID validation across all subcommands (Finding 2)"
+subcmds=("add" "add-svc" "rm-svc" "rm" "apply" "restart" "kcp" "plain" "noise" "ws" "status" "logs")
+all_rejected=1
+for sc in "${subcmds[@]}"; do
+  for bad_id in "../../bad" "." ".." "main" "a/b" "bad id"; do
+    if bash "$RUN_NODE" cmd_upstream "$sc" "$bad_id" >/dev/null 2>&1; then
+      all_rejected=0
+      echo "FAIL: cmd_upstream $sc accepted invalid ID '$bad_id'"
+    fi
+  done
+done
+[ "$all_rejected" -eq 1 ]
+assert_ok $? "tamam-e 12 subcommand-e upstream ID-haye namotabar ra rad kardand"
+
+bash "$RUN_NODE" cmd_upstream add valid01 1.2.3.4:443 valid01.com >/dev/null 2>&1
+assert_ok $? "cmd_upstream add ba ID-e motabar (valid01) movafagh shod"
+
+line "tst 28: KCP unit generator injection rejection (Finding 3)"
+INJ_REMOTE=$'1.2.3.4:29900\nExecStartPre=/bin/sh -c "touch evil"'
+INJ_KEY=$'secret\nInjectedDirective=true'
+
+if bash "$RUN_NODE" gen_kcp_client_unit "$INJ_REMOTE" "127.0.0.1:29900" "validkey" 10 3 fast 1024 1024 >/dev/null 2>&1; then
+  assert_ok 1 "gen_kcp_client_unit bayad CRLF injection dar remote ra rad mikard"
+else
+  assert_ok 0 "gen_kcp_client_unit CRLF injection dar remote ra rad kard"
+fi
+
+if bash "$RUN_NODE" gen_kcp_client_unit "1.2.3.4:29900" "127.0.0.1:29900" "$INJ_KEY" 10 3 fast 1024 1024 >/dev/null 2>&1; then
+  assert_ok 1 "gen_kcp_client_unit bayad CRLF injection dar key ra rad mikard"
+else
+  assert_ok 0 "gen_kcp_client_unit CRLF injection dar key ra rad kard"
+fi
+
+if bash "$RUN_NODE" gen_up_kcp_unit "valid01" "$INJ_REMOTE" "127.0.0.1:29901" "validkey" 10 3 fast 1024 1024 >/dev/null 2>&1; then
+  assert_ok 1 "gen_up_kcp_unit bayad CRLF injection dar remote ra rad mikard"
+else
+  assert_ok 0 "gen_up_kcp_unit CRLF injection dar remote ra rad kard"
+fi
+
+if bash "$RUN_NODE" gen_up_kcp_unit "valid01" "1.2.3.4:29900" "127.0.0.1:29901" "$INJ_KEY" 10 3 fast 1024 1024 >/dev/null 2>&1; then
+  assert_ok 1 "gen_up_kcp_unit bayad CRLF injection dar key ra rad mikard"
+else
+  assert_ok 0 "gen_up_kcp_unit CRLF injection dar key ra rad kard"
+fi
+
+line "tst 29: RTH_LOCK environment override protection va symlink rejection (Finding 4)"
+TARGET_FILE="$ROOT/do_not_touch.txt"
+echo "PROTECTED_CONTENT" > "$TARGET_FILE"
+(
+  export RATHOLE_TEST_MODE=0
+  export RTH_LOCK="$TARGET_FILE"
+  export RATHOLENODE_LIB_ONLY=1
+  source "$BASE/ratholenode"
+  rth_with_lock true >/dev/null 2>&1
+)
+rc=$?
+assert_eq "$rc" "1" "RTH_LOCK override dar halat-e ghyr-e test bayad fail-closed shavad"
+[ "$(cat "$TARGET_FILE")" = "PROTECTED_CONTENT" ]
+assert_ok $? "target file truncate ya dastkhorde nashod (exec 9>> amniat)"
+
+SYMLINK_LOCK="$ROOT/symlink.lock"
+ln -s "$TARGET_FILE" "$SYMLINK_LOCK" 2>/dev/null || true
+if [ -L "$SYMLINK_LOCK" ]; then
+  (
+    export RATHOLE_TEST_MODE=1
+    export RTH_TEST_DIR="$ROOT"
+    export RATHOLENODE_LIB_ONLY=1
+    source "$BASE/ratholenode"
+    RTH_LOCK="$SYMLINK_LOCK"
+    rth_with_lock true >/dev/null 2>&1
+  )
+  rc=$?
+  assert_eq "$rc" "1" "symlink lock bayad rad shavad"
+  [ "$(cat "$TARGET_FILE")" = "PROTECTED_CONTENT" ]
+  assert_ok $? "target file az tarigh-e symlink dastkhorde nashod"
+else
+  assert_ok 0 "symlink lock check (symlinks unsupported on current filesystem)"
+  assert_ok 0 "target file dast-nakhorde mand"
+fi
+
+line "tst 30: Nginx regeneration rollback on nginx -t failure (Finding 8)"
+bash "$RUN" regenerate >/dev/null 2>&1
+CONF="$ROOT/etc/nginx/conf.d/rathole.conf"
+STREAM="$ROOT/etc/nginx/stream.d/rathole-stream.conf"
+MAIN_CONF="$ROOT/etc/nginx/nginx.conf"
+TOML="$ROOT/etc/rathole/server.toml"
+
+PRE_CONF_SHA="$(sha256sum "$CONF" | cut -d' ' -f1)"
+PRE_MAIN_SHA="$(sha256sum "$MAIN_CONF" | cut -d' ' -f1)"
+PRE_TOML_SHA="$(sha256sum "$TOML" | cut -d' ' -f1)"
+
+FAIL_NGINX_T_ONCE=1 bash "$RUN" regenerate >/dev/null 2>&1
+RC=$?
+[ "$RC" -ne 0 ]
+assert_ok $? "regenerate ba FAIL_NGINX_T_ONCE=1 khata dad"
+
+POST_CONF_SHA="$(sha256sum "$CONF" | cut -d' ' -f1)"
+POST_MAIN_SHA="$(sha256sum "$MAIN_CONF" | cut -d' ' -f1)"
+POST_TOML_SHA="$(sha256sum "$TOML" | cut -d' ' -f1)"
+
+assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf pas az khata-ye nginx -t rollback shod"
+assert_eq "$POST_MAIN_SHA" "$PRE_MAIN_SHA" "nginx.conf pas az khata-ye nginx -t rollback shod"
+assert_eq "$POST_TOML_SHA" "$PRE_TOML_SHA" "server.toml pas az khata-ye nginx -t rollback shod"
+
+line "tst 31: Nginx regeneration rollback when nginx -t passes but reload/restart fails (Finding 8)"
+FAIL_SYSTEMCTL_RELOAD=1 bash "$RUN" regenerate >/dev/null 2>&1
+RC=$?
+[ "$RC" -ne 0 ]
+assert_ok $? "regenerate ba FAIL_SYSTEMCTL_RELOAD=1 khata dad"
+
+POST_CONF_SHA2="$(sha256sum "$CONF" | cut -d' ' -f1)"
+POST_MAIN_SHA2="$(sha256sum "$MAIN_CONF" | cut -d' ' -f1)"
+POST_TOML_SHA2="$(sha256sum "$TOML" | cut -d' ' -f1)"
+
+assert_eq "$POST_CONF_SHA2" "$PRE_CONF_SHA" "rathole.conf pas az khata-ye reload rollback shod"
+assert_eq "$POST_MAIN_SHA2" "$PRE_MAIN_SHA" "nginx.conf pas az khata-ye reload rollback shod"
+assert_eq "$POST_TOML_SHA2" "$PRE_TOML_SHA" "server.toml pas az khata-ye reload rollback shod"
+
+line "tst 32: honest service helpers (restart_svc va reload_svc) (Finding 9)"
+(
+  export SYSTEMCTL_NOT_FOUND=1
+  bash "$RUN_NODE" restart_svc >/dev/null 2>&1
+)
+rc=$?
+assert_eq "$rc" "1" "restart_svc vaghti systemctl peyda nashod return 1 dad"
+
+(
+  export SYSTEMCTL_NOT_FOUND=1
+  bash "$RUN_NODE" reload_svc >/dev/null 2>&1
+)
+rc=$?
+assert_eq "$rc" "1" "reload_svc vaghti systemctl peyda nashod return 1 dad"
+
+(
+  export FAIL_SYSTEMCTL_RELOAD=1
+  bash "$RUN_NODE" restart_svc >/dev/null 2>&1
+)
+rc=$?
+assert_eq "$rc" "1" "restart_svc vaghti restart shekast khord return 1 dad"
+
+(
+  export FAIL_SYSTEMCTL_RELOAD=1
+  export FAIL_SYSTEMCTL_START=1
+  export FAIL_SYSTEMCTL_IS_ACTIVE=1
+  bash "$RUN_NODE" reload_svc >/dev/null 2>&1
+)
+rc=$?
+assert_eq "$rc" "1" "reload_svc vaghti start/reload shekast khord return 1 dad"
 
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"
