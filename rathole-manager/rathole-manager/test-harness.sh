@@ -98,6 +98,11 @@ source "$ROOT/ratholectl.lib"
 need_root(){ :; }
 nginx(){ return 0; }
 systemctl(){ return 0; }
+dpkg(){ return 0; }
+apt-get(){ return 0; }
+certbot(){ return 0; }
+ssh(){ return 0; }
+scp(){ return 0; }
 "\$@"
 EOF
 chmod +x "$RUN"
