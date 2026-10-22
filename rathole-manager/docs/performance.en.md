@@ -165,4 +165,4 @@ Apply each step separately so you know what actually helped.
 
 - [`transport-modes.en.md`](transport-modes.en.md) — KCP profiles and all transport modes
 - [`architecture.en.md`](architecture.en.md) — system architecture
-- [CLI Reference (Wiki)](https://github.com/loopy-iri/RatholeEngine/wiki/CLI-Reference) — `ratholectl tune`, `kcp`, `ratholenode tune`
+- [CLI Reference (Wiki)](https://github.com/oldrcesupport/rathole-tunnel/wiki/CLI-Reference) — `ratholectl tune`, `kcp`, `ratholenode tune`

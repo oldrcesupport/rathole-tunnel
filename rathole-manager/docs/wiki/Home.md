@@ -1,6 +1,6 @@
-# RatholeEngine Wiki
+# rathole-tunnel Wiki
 
-خوش آمدید به مستندات جامع و ویکی پروژه **RatholeEngine**.
+خوش آمدید به مستندات جامع و ویکی پروژه **rathole-tunnel**.
 
 این سیستم یک راهکار **معکوس‌تونل (Reverse Tunnel)** پیشرفته و چندموقعیتی بر پایه‌ی **rathole + Nginx** برای عبور از فیلترینگ شدید است.
 
@@ -46,9 +46,9 @@
 
 ## 📜 لایسنس (License)
 
-پروژه تحت لایسنس **[AGPL-3.0-or-later](https://github.com/loopy-iri/RatholeEngine/blob/main/LICENSE)** به‌صورت متن‌باز منتشر شده است.
+پروژه تحت لایسنس **[AGPL-3.0-or-later](https://github.com/oldrcesupport/rathole-tunnel/blob/main/LICENSE)** به‌صورت متن‌باز منتشر شده است.
 
 نسخه‌های تا v1.7.0 تحت MIT منتشر شده بودند و همچنان تحت MIT در دسترس‌اند؛ از آن پس پروژه AGPL-3.0 است.
-نکته‌ی عملی (بند ۱۳ AGPL): اگر RatholeEngine را تغییر دهید و دیگران از طریق شبکه با نسخه‌ی تغییریافته‌ی شما
+نکته‌ی عملی (بند ۱۳ AGPL): اگر rathole-tunnel را تغییر دهید و دیگران از طریق شبکه با نسخه‌ی تغییریافته‌ی شما
 کار کنند (مثلاً پنل وب `ratholehub` را برایشان اجرا کنید)، باید سورس نسخه‌ی خود را به آن‌ها ارائه دهید.
-جزئیات در [NOTICE](https://github.com/loopy-iri/RatholeEngine/blob/main/NOTICE).
+جزئیات در [NOTICE](https://github.com/oldrcesupport/rathole-tunnel/blob/main/NOTICE).

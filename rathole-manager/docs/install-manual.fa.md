@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="RatholeEngine" width="110" height="110" />
+<img src="assets/logo.svg" alt="rathole-tunnel" width="110" height="110" />
 
-# نصب کامل و دستی — RatholeEngine
+# نصب کامل و دستی — rathole-tunnel
 
 **پنل ایران + کانفیگ پاسارگارد + نودهای خارج + هاب مرکزی**
 

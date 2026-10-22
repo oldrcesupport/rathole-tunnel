@@ -704,7 +704,7 @@ Expected: only the user-owned untracked `AGENTS.md` may remain; no tracked chang
 
 ```bash
 git push origin main
-git tag -a v1.5.0 -m "RatholeEngine v1.5.0"
+git tag -a v1.5.0 -m "rathole-tunnel v1.5.0"
 git push origin v1.5.0
 ```
 

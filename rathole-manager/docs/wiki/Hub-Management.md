@@ -17,7 +17,7 @@ sudo ratholectl hub on [port]
 sudo bash rathole-manager/ratholehub/install-hub.sh
 
 # نصب از GitHub:
-curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --hub
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --hub
 ```
 
 ---

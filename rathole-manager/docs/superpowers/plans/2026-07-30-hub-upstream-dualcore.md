@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Commit identity:** author `loopy-iri`, **no** Claude co-author trailer.
+- **Commit identity:** author `oldrcesupport`, **no** Claude co-author trailer.
 - **Secrets never committed:** `state.json`, `node.env`, `services.conf`, `inventory.json`, `config.json`, certs/keys are gitignored.
 - **LF line endings**, scripts executable; no CRLF (jq on Windows emits `\r` — strip with `${v%$'\r'}` before writing TOML).
 - **Bash:** keep `set -uo pipefail` (not `-e`); the `jq | while read` pattern returns nonzero by design. Temp files via `rth_mktemp`/`rth_mktempd`.

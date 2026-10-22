@@ -1,71 +1,65 @@
-# معماری — سه نقش و اصل مرکزی طراحی
+# معماری جامع — سه نقش، اصول طراحی و استحکام امنیتی (v1.8.5)
 
-`rathole-manager` یک سیستم تونل معکوس چند-موقعیتی بر پایه‌ی **rathole + Nginx** است. یک سرور ایران (پشت یک دامنه، یک گواهی، یک پورت ۴۴۳) جلوی چند «نود» خارجی قرار می‌گیرد که با تونل معکوس به آن وصل می‌شوند. ترافیک کاربر با **path** به نودها مسیریابی می‌شود (`map $uri $backend_port` در nginx).
+`rathole-manager` یک سامانه پیشرفته، ماژولار و امن برای مدیریت تونل‌های معکوس چند-موقعیتی بر پایه‌ی **rathole + Nginx** است. یک سرور ایران (پشت یک دامنه، یک گواهی معتبر SSL و پورت ۴۴۳) ترافیک را دریافت کرده و به نودهای خارجی که با تونل معکوس به آن متصل هستند هدایت می‌کند.
 
 ![نمای معماری](assets/architecture.svg)
 
-*همه‌چیز روی یک پورت/دامنه پشت Nginx؛ نودهای خارج با تونل معکوس به سرور ایران وصل می‌شوند.*
+---
 
-## سه نقش، سه برنامه
+## ۱. سه نقش و ساختار اجرایی
 
-| نقش | برنامه | کار |
-|-----|--------|-----|
-| **پنل ایران** | [`ratholectl`](../rathole-manager/ratholectl) (bash) | rathole **server** + nginx. مالک inventory نودها. `server.toml` و `rathole.conf` را تولید می‌کند. |
-| **نود خارج** | [`ratholenode`](../rathole-manager/ratholenode) (bash) | rathole **client**. `client.toml` را تولید می‌کند. |
-| **هاب** | [`ratholehub/hub.py`](../rathole-manager/ratholehub/hub.py) (Python، فقط stdlib) | پنل وب مرکزی که چند سرور ایران/نود را از طریق SSH مدیریت می‌کند. جزئیات: [`hub.md`](hub.md). |
+| نقش | ابزار اجرایی | زبان / وابستگی | وظایف و مسئولیت‌ها |
+| :--- | :--- | :--- | :--- |
+| **پنل ایران** | [`ratholectl`](../rathole-manager/ratholectl) | Bash (بدون وابستگی) | مدیریت rathole-server و Nginx، نگهداری state نودها، تولید امن کانفیگ‌های `server.toml` و `rathole.conf`، مدیریت گواهی‌های SSL و دیواره ضدپروب. |
+| **نود خارج** | [`ratholenode`](../rathole-manager/ratholenode) | Bash (بدون وابستگی) | مدیریت rathole-client، اتصال تونل معکوس به سرور ایران، تولید `client.toml` و نگاشت پورت‌ها به اینباندهای Xray/V2Ray. |
+| **هاب مرکزی** | [`ratholehub/hub.py`](../rathole-manager/ratholehub/hub.py) | Python 3 (فقط stdlib) | داشبورد تحت وب گرافیکی و REST API جهت مدیریت چند سرور ایران و نودها با اتصال امن SSH، اعتبارسنجی آرگومان‌ها و ثبت لاگ‌های ممیزی. |
 
-`common.sh` توسط هر دو ابزار bash سورس می‌شود (رنگ/لاگ، `kcp_profile`، `install_kcptun`، `apply_sysctl_tuning`، `fakeweb_service`).
+اسکریپت مشترک [`common.sh`](../rathole-manager/common.sh) شامل توابع بنیادین امنیتی (`umask 077`، قفل‌های fail-closed، اعتبارسنجی پورت‌ها، تیونینگ هسته BBR و دیواره دفاعی سایت فیک) توسط تمام ابزارها فراخوانی می‌شود.
 
-## اصل مرکزی: state → regenerate → hot-reload
+---
 
-هر تغییری همین الگو را دارد — **هیچ‌وقت کانفیگ‌های تولیدشده را دستی ویرایش نکن**؛ state را عوض کن و بازتولید کن:
+## ۲. اصول طراحی و استحکام امنیتی (Hardened Core)
 
-![چرخه state→regenerate→reload](assets/state-regenerate-reload.svg)
+### الف) چرخه اتمیک: State → Regenerate → Hot-Reload
+هیچ فایلی نباید دستی ویرایش شود. تمامی تغییرات از چرخه تراکنشی عبور می‌کنند:
+1. **تراکنش اتمیک (`rth_state_tx`):** هر تغییر در فایل `state.json` ابتدا در یک فایل موقت امن با دسترسی `0600` نوشته شده و پس از اعتبارسنجی JSON، به صورت اتمیک جایگزین می‌گردد.
+2. **قفل‌گذاری Fail-Closed (`rth_with_lock`):** در صورت بروز هرگونه تداخل یا عدم امکان باز کردن قفل، عملیات متوقف شده و از اجرای بدون قفل یا بروز Race Condition پیشگیری می‌شود.
+3. **تست و بارگذاری بدون قطعی (Zero-Downtime Hot-Reload):** کانفیگ با حفظ inode نوشته شده تا مکانیزم `config_watcher` در rathole بدون قطع کانکشن‌های فعال کاربران، تغییرات را اعمال کند. در Nginx نیز ابتدا تست نحوی `nginx -t` اجرا شده و در صورت شکست، کانفیگ به نسخه پشتیبان سالم (`.rathole-good.bak`) بازگردانده می‌شود.
 
-- **ratholectl**: state در `/etc/rathole-manager/state.json` (با jq). دستورها state را تغییر می‌دهند، سپس `regenerate()` → `gen_server_toml()` + `gen_nginx_conf()` → `nginx -t` → reload. کانفیگ‌ها **در جای خود** (با حفظ inode) نوشته می‌شوند تا `config_watcher` در rathole بدون قطع تونل‌های فعال hot-reload کند. اگر `nginx -t` شکست بخورد، به `.rathole-good.bak` برمی‌گردد.
-- **ratholenode**: state در `/etc/rathole/node.env` + `/etc/rathole/services.conf`. `gen_client()` فایل `client.toml` را می‌سازد؛ `reload_svc` hot-reload را به restart ترجیح می‌دهد (restart فقط برای تغییر transport مثل روشن/خاموش‌کردن kcp).
+### ب) هم‌ترازی سه‌گانه: Path == نام نود == اینباند Xray
+در معماری لایه ۷، نام هر نود (مانند `trk01`) هم‌زمان سه نقش ایفا می‌کند:
+- مسیر URL کاربر: `https://domain.com/trk01`
+- کلید نگاشت در Nginx: `map $uri $backend_port`
+- مسیر اینباند VLESS/VMess در نود خارجی: `path: /trk01`
 
-## path == نام نود == نگاشت nginx == inbound Xray
+---
 
-نام یک نود هم‌زمان مسیر URL آن، ورودی `map` در nginx، و path اینباند Xray روی نود است. این سه باید یکسان بمانند. هر نود یک سرویس داده دارد؛ افزودن `--api-port` یک سرویس `<name>_api` هم می‌سازد (bind روی `127.0.0.1`) برای مدیریت پنل↔نود از طریق تونل.
+## ۳. دفاع فعال در برابر فیلترینگ و اسکنرهای هوشمند (Active Defense)
 
-## حالت‌های transport
+در این معماری، فیلترچی و ربات‌های اسکن شبکه با دیواره‌های هوشمند چندلایه مواجه می‌شوند:
+- **پاسخ شبیه‌سازی وب‌سرور واقعی (Fake Web 200 OK):** درخواست‌های متفرقه یا اسکن‌های ریشه (`/`) به جای خطاهای مشکوک ۵۰۲ یا Connection Refused، پاسخ یک وب‌سایت شرکتی مدرن با کد وضعیت `200 OK` را دریافت می‌کنند.
+- **مسیر پنهان کنترلی (Hidden Control Path):** کانال اتصال نودها به سرور ایران از طریق یک مسیر استتارشده با هدرهای استاندارد WebSocket برقرار می‌شود.
+- **تفکیک بدون بافر XHTTP (SplitHTTP):** عبور استریم پیوسته با غیرفعال‌سازی کامل بافرینگ جهت محافظت در برابر بازرسی عمیق بسته‌ها (DPI).
 
-همان تونل می‌تواند ترافیک را **پنج جور** حمل کند (websocket+TLS پیش‌فرض، kcp، plain، noise، backhaul) به‌علاوه‌ی حالت game/SNI و دو ورودی کاربری (direct-IP، proxy). جزئیات کامل: [`transport-modes.md`](transport-modes.md).
+---
 
-## ورودی‌های کاربری (Ingress)
+## ۴. حالت‌های متنوع ترانزیت (Transport Modes)
 
-علاوه بر مسیریابی استاندارد با path روی ۴۴۳، دو ورودی جایگزین برای کاربر وجود دارد:
+سامانه از شیوه‌های مختلف عبور ترافیک متناسب با شرایط شبکه پشتیبانی می‌کند:
+1. **WebSocket + TLS (پیش‌فرض):** استتار استاندارد پشت پورت ۴۴۳ وب‌سرور Nginx.
+2. **XHTTP (SplitHTTP):** ترافیک مقاوم و پیوسته وب بدون قطعی تحت سناریوهای شدید اختلال.
+3. **حالت گیمینگ لایه ۴ (Game 0-RTT Vision):** عبور مستقیم استریم TCP/UDP بر اساس SNI توسط ماژول Stream در Nginx، بدون دخالت لایه ۷ و بدون رمزگشایی در سرور ایران (حداقل پینگ و تاخیر صفر).
+4. **KCP (UDP+FEC):** ترانزیت ضد پکت‌لاس با الگوریتم اصلاح خطای Reed-Solomon شبیه‌ساز پروتکل QUIC گوگل روی پورت ۴۴۳.
+5. **Noise & Backhaul (SMUX):** کانال‌های اختصاصی با رمزنگاری پیشرفته ChaCha20-Poly1305 و مالتی‌پلکسینگ کانکشن‌ها.
+6. **Direct-IP & Reverse Proxy:** هدایت بر اساس هدر اختصاصی بدون نیاز به دامنه، یا پروکسی معکوس برای سرویس‌های مستقل.
 
-- **direct-IP:** یک پورت HTTP جداگانه (پیش‌فرض ۸۰۸۱) که کاربر مستقیم به IP سرور وصل می‌شود. انتخاب نود با یک هدر استتارشده (`X-Cdn-Id: <node_name>`) انجام می‌شود — نه path. مسیر تونل ایران↔نود دست‌نخورده می‌ماند.
-- **proxy:** یک `/<name>/` روی همان ۴۴۳ که به یک upstream دلخواه proxy می‌شود — **بدون عبور از rathole**. برای سرویس‌های مستقل که نمی‌خواهی یک تونل جداگانه باز کنی.
+---
 
-## چند دامنه و گواهی IP
+## ۵. مستندات تفصیلی و مراجع تکمیلی
 
-یک سرور ایران می‌تواند چند دامنه را پشتیبانی کند — هر کدام با server block جداگانه روی همان ۴۴۳:
-
-```bash
-ratholectl domain add cdn.example.ir [--certbot]   # دامنه اضافی
-ratholectl domain primary cdn.example.ir           # تغییر دامنه اصلی
-```
-
-برای کاربرانی که می‌خواهند مستقیم با IP سرور وصل شوند (بدون دامنه)، می‌توان یک گواهی self-signed برای آن IP ساخت و روی نود به‌عنوان trusted root ثبت کرد:
-
-```bash
-ratholectl ip-cert <IPv4>                          # ساخت گواهی self-signed
-ratholenode set-main <ip>:443 <ip> /path/to/cert   # ثبت trusted root روی نود
-```
-
-## مستندات مرتبط
-
-- [`transport-modes.md`](transport-modes.md) — حالت‌های transport (فارسی)
-- [`transport-modes.en.md`](transport-modes.en.md) — Transport Modes (English)
-- [`hub.md`](hub.md) — پنل هاب، REST API و مدل امنیتی (فارسی)
-- [`hub.en.md`](hub.en.md) — Hub panel, REST API and security model (English)
-- [`traffic-flow.md`](traffic-flow.md) — مسیر بسته لایه‌به‌لایه (شامل direct-IP و proxy).
-- [`performance.md`](performance.md) — تیونینگ فراتر از تونل (BBR، kcp، گلوگاه‌های غیرتونل).
-- [`README.fa.md`](README.fa.md) — مرجع کامل CLI و روش‌های نصب.
-- [`install-manual.fa.md`](install-manual.fa.md) — نصب دستی گام‌به‌گام (فارسی)
-- [`install-manual.md`](install-manual.md) — Manual install walkthrough (English)
-- [**Wiki — مرجع کامل دستورات**](https://github.com/loopy-iri/RatholeEngine/wiki/CLI-Reference)
-- [`../rathole-multilocation-pasargad.md`](../rathole-multilocation-pasargad.md) — سند طراحی/عیب‌یابی تفصیلی اصلی.
+- [راهنمای جامع حالت‌های ترانزیت (`transport-modes.md`)](transport-modes.md)
+- [مسیر دقیق جریان بسته‌ها (`traffic-flow.md`)](traffic-flow.md)
+- [مدل امنیتی و معماری هاب مرکزی (`hub.md`)](hub.md)
+- [بهینه‌سازی کارایی و تیونینگ شبکه (`performance.md`)](performance.md)
+- [راهنمای نصب دستی گام‌به‌گام (`install-manual.fa.md`)](install-manual.fa.md)
+- [مرجع کامل خط فرمان در ویکی مخزن](https://github.com/oldrcesupport/rathole-tunnel/wiki/CLI-Reference)

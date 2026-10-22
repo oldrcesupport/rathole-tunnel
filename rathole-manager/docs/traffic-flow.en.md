@@ -192,5 +192,37 @@ User ──wss://domain:443/mysvc/──► nginx (:443, TLS)
 - **Reverse topology:** foreign nodes connect to Iran (not the other way); the Iran server has a clean public domain/IP.
 - **Camouflage:** tunnel and data traffic looks like regular HTTPS/WSS to a legitimate domain; a fake site on root adds cover.
 - **Scalability:** adding a node = one line in `map` + one rathole service; all automated by `ratholectl add`.
+- **Gaming Optimization:** Nginx Stream module inspects SNI at L4, bypassing L7 processing for 0-RTT Vision and UDP FullCone packet flows.
+
+---
+
+## Layer 4 Gaming Traffic Flow (Game 0-RTT Vision)
+
+In Gaming Mode, traffic bypasses Layer 7 Nginx entirely without local TLS decryption in Iran:
+
+```
+User ──TLS/443 (SNI: game.example.com)──► Nginx Stream (:443 L4)
+                                             │ (Inspects SNI in TLS ClientHello)
+                                             ▼
+                                      map $ssl_preread_server_name
+                                             │
+                                             ▼
+                                      rathole data port (e.g. :20001)
+                                             │ (Reverse tunnel)
+                                             ▼
+                                      Foreign Node (rathole client)
+                                             │
+                                             ▼
+                                      Xray Inbound (VLESS-Vision :2087)
+                                             │ (Actual TLS handshake on node)
+                                             ▼
+                                      Exit to Gaming Servers (0-RTT / Minimal Ping)
+```
+
+**Key Advantages:**
+- Full support for UDP FullCone and TCP Vision passthrough.
+- Eliminates Layer 7 proxy buffering and latency.
+- No TLS certificates required on Iran server for the game SNI (certificates reside on foreign nodes).
 
 For install and management details: [`README.fa.md`](README.fa.md) (Persian) or [`install-manual.md`](install-manual.md) (English).
+

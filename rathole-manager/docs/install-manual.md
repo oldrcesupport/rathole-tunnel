@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="RatholeEngine" width="110" height="110" />
+<img src="assets/logo.svg" alt="rathole-tunnel" width="110" height="110" />
 
-# Full Manual Install — RatholeEngine
+# Full Manual Install — rathole-tunnel
 
 **Iran panel + Pasargad config + foreign nodes + central hub**
 

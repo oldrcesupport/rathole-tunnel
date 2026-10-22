@@ -1,81 +1,65 @@
-# Architecture — Three Roles and the Central Design Principle
+# System Architecture — Three Roles, Core Principles & Security Hardening (v1.8.5)
 
-`rathole-manager` is a multi-location reverse-tunnel system built on **rathole + Nginx**. A single Iran server — behind one domain, one certificate, one port 443 — fronts many foreign "nodes" that connect back over a reverse tunnel. User traffic is routed to nodes **by URL path** (`map $uri $backend_port` in nginx).
+`rathole-manager` is a production-grade, modular, and hardened reverse tunnel management system built on **rathole + Nginx**. An edge relay in Iran (fronted by a single domain, valid TLS certificate, and port 443) multiplexes traffic to multiple external nodes connected via reverse tunnels.
 
-![Architecture overview](assets/architecture.svg)
-
-*Everything on one port/domain behind Nginx; foreign nodes connect to the Iran server via reverse tunnel.*
+![Architecture Overview](assets/architecture.svg)
 
 ---
 
-## Three Roles, Three Programs
+## 1. Three Roles, Three Executables
 
-| Role | Program | Responsibility |
-|------|---------|----------------|
-| **Iran panel** | [`ratholectl`](../rathole-manager/ratholectl) (bash) | rathole **server** + nginx. Owns node inventory. Generates `server.toml` + `rathole.conf`. |
-| **Foreign node** | [`ratholenode`](../rathole-manager/ratholenode) (bash) | rathole **client**. Generates `client.toml`. |
-| **Hub** | [`ratholehub/hub.py`](../rathole-manager/ratholehub/hub.py) (Python, stdlib only) | Central web panel driving multiple Iran servers/nodes over SSH. Details: [`hub.en.md`](hub.en.md). |
+| Role | Binary / Script | Stack | Responsibilities |
+| :--- | :--- | :--- | :--- |
+| **Iran Panel** | [`ratholectl`](../rathole-manager/ratholectl) | Bash (zero-dep) | Manages rathole-server & Nginx, maintains state inventory, generates hardened `server.toml` & `rathole.conf`, manages TLS certs and active fake web probe defense. |
+| **External Node** | [`ratholenode`](../rathole-manager/ratholenode) | Bash (zero-dep) | Manages rathole-client, establishes reverse tunnel to Iran, generates `client.toml`, and maps ports to local Xray/V2Ray inbounds. |
+| **Central Hub** | [`ratholehub/hub.py`](../rathole-manager/ratholehub/hub.py) | Python 3 (stdlib only) | Central visual web panel & REST API managing multiple servers over secure SSH using sanitized argv lists, PBKDF2 authentication, and tamper-evident audit logging. |
 
-`common.sh` is sourced by both bash tools (colors/logging, `kcp_profile`, `install_kcptun`, `apply_sysctl_tuning`, `fakeweb_service`).
-
----
-
-## Core Principle: State → Regenerate → Hot-Reload
-
-Every mutation follows this pattern — **never hand-edit generated configs**; change state and regenerate:
-
-![State→Regenerate→Reload cycle](assets/state-regenerate-reload.svg)
-
-- **ratholectl:** state is `/etc/rathole-manager/state.json` (jq-manipulated). Commands mutate state, then call `regenerate()` → `gen_server_toml()` + `gen_nginx_conf()` → `nginx -t` → reload. Configs are written **in place (inode preserved)** so rathole's `config_watcher` hot-reloads without dropping active tunnels. Auto-reverts to `.rathole-good.bak` if `nginx -t` fails.
-- **ratholenode:** state is `/etc/rathole/node.env` + `/etc/rathole/services.conf`. `gen_client()` builds `client.toml`; `reload_svc` prefers hot-reload over restart (restart only for transport changes like kcp on/off).
+The shared library [`common.sh`](../rathole-manager/common.sh) is sourced by all Bash tooling to enforce `umask 077`, fail-closed file locking, numeric port validation, BBR kernel tuning, and fake web server templates.
 
 ---
 
-## Path == Node Name == Nginx Map == Xray Inbound
+## 2. Core Architectural Principles (Hardened Core)
 
-A node's `name` is simultaneously its URL path, its nginx `map` entry, and the Xray inbound path on the node. These three must stay identical. Each node has a data service; adding `--api-port` also creates a `<name>_api` service (bound to `127.0.0.1`) for panel↔node management over the tunnel.
+### A) Atomic Mutation Cycle: State → Regenerate → Hot-Reload
+Configs are never manually altered. All changes follow a transactional path:
+1. **Transactional State (`rth_state_tx`):** Every mutation writes to a secure temporary file (`0600`), validates JSON integrity, and atomically swaps the state file.
+2. **Fail-Closed Locking (`rth_with_lock`):** If a lock file cannot be acquired or opened, the process terminates immediately with a non-zero exit code, preventing race conditions and silent unlocked runs.
+3. **Zero-Downtime Hot-Reload:** Configurations are written in-place to preserve inodes so that rathole's `config_watcher` updates tunnels without dropping active user connections. Nginx syntax is validated via `nginx -t` prior to reload, with automatic fallback to `.rathole-good.bak` on failure.
 
----
-
-## Transport Modes
-
-The same tunnel can carry traffic **five** ways (websocket+TLS default, kcp, plain, noise, backhaul) plus game/SNI mode and two user ingress modes (direct-IP, proxy). Full details: [`transport-modes.en.md`](transport-modes.en.md).
-
----
-
-## User Ingress Modes
-
-Beyond standard path-routing on 443, two alternative user entry points exist:
-
-- **direct-IP:** a separate HTTP port (default 8081) where users connect directly to the Iran server IP. Node selection uses a hidden header (`X-Cdn-Id: <node_name>`) instead of URL path. The tunnel between Iran↔node is untouched.
-- **proxy:** a `/<name>/` path on the same 443 that `proxy_pass`es to any upstream — **without going through rathole**. For independent services that don't need a tunnel.
+### B) Path Alignment: Path == Node Name == Nginx Map == Xray Inbound
+In Layer 7 mode, a node name (e.g., `trk01`) aligns across three planes:
+- Client request URL: `https://domain.com/trk01`
+- Nginx upstream map: `map $uri $backend_port`
+- Target node Xray inbound: `path: /trk01`
 
 ---
 
-## Multi-Domain and IP Certificate
+## 3. Active Probe & Censorship Defense
 
-One Iran server can serve multiple domains — each with its own nginx server block on the same port 443:
-
-```bash
-ratholectl domain add cdn.example.ir [--certbot]
-ratholectl domain primary cdn.example.ir
-```
-
-For users connecting directly via IP (no domain), a self-signed cert for the IP can be created and trusted on the node:
-
-```bash
-ratholectl ip-cert <IPv4>                           # Iran: create self-signed cert
-ratholenode set-main <ip>:443 <ip> /path/to/cert    # Node: trust the cert
-```
+The architecture provides active defense against Deep Packet Inspection (DPI) and active network probing:
+- **Fake Web 200 OK:** Unauthenticated root (`/`) requests or scanning probes receive a clean corporate website response with status `200 OK` rather than suspicious 502 Bad Gateway or closed ports.
+- **Hidden Control Path:** Node reverse tunnels connect through an obfuscated, randomized path using standard WebSocket upgrade headers.
+- **Unbuffered XHTTP (SplitHTTP):** Real-time chunked streaming with disabled buffering to evade machine-learning traffic classifiers.
 
 ---
 
-## See Also
+## 4. Supported Transport Modes
 
-- [`transport-modes.en.md`](transport-modes.en.md) — all transport/ingress modes with commands
-- [`hub.en.md`](hub.en.md) — Hub panel, REST API, security model
-- [`traffic-flow.md`](traffic-flow.md) — packet path layer by layer (Persian)
-- [`performance.en.md`](performance.en.md) — tuning beyond the tunnel
-- [`README.fa.md`](README.fa.md) — full CLI reference and install flows (Persian)
-- [`install-manual.md`](install-manual.md) — full manual install walkthrough (English)
-- [Wiki — CLI Reference](https://github.com/loopy-iri/RatholeEngine/wiki/CLI-Reference)
+The system supports multiple transport protocols suited for varied ISP filtering conditions:
+1. **WebSocket + TLS (Default):** Standard HTTPS camouflage on port 443 behind Nginx.
+2. **XHTTP (SplitHTTP):** Resilient bidirectional web stream protocol with zero buffering.
+3. **Layer 4 Gaming (Game 0-RTT Vision):** Zero-latency direct TCP/UDP SNI passthrough via Nginx Stream module without L7 interception or TLS decryption on the Iran server.
+4. **KCP (UDP+FEC):** Packet-loss mitigation protocol utilizing Reed-Solomon forward error correction, simulating Google QUIC on UDP port 443.
+5. **Noise & Backhaul (SMUX):** Encrypted ChaCha20-Poly1305 multi-stream tunnels.
+6. **Direct-IP & Reverse Proxy:** Custom header-based routing or standalone upstream reverse proxying.
+
+---
+
+## 5. Related Documentation
+
+- [Transport Modes Deep Dive (`transport-modes.en.md`)](transport-modes.en.md)
+- [Packet Life Cycle & Flow (`traffic-flow.en.md`)](traffic-flow.en.md)
+- [Central Hub Security & API (`hub.en.md`)](hub.en.md)
+- [Kernel Tuning & Performance (`performance.en.md`)](performance.en.md)
+- [Manual Installation Guide (`install-manual.md`)](install-manual.md)
+- [GitHub Wiki CLI Reference](https://github.com/oldrcesupport/rathole-tunnel/wiki/CLI-Reference)

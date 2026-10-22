@@ -1,24 +1,24 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="RatholeEngine" width="120" height="120" />
+<img src="assets/logo.svg" alt="rathole-tunnel" width="120" height="120" />
 
-# RatholeEngine
+# rathole-tunnel
 
 **سیستم تونل معکوس چند-موقعیتی روی rathole + Nginx**
 
 _یک پورت (۴۴۳) · یک دامنه · یک گواهی · مسیریابی نودها با path_
 _ساخته‌شده برای تونل مقاومِ سانسور به داخل ایران._
 
-[![CI](https://github.com/loopy-iri/RatholeEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/loopy-iri/RatholeEngine/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/loopy-iri/RatholeEngine?sort=semver&color=7c3aed)](https://github.com/loopy-iri/RatholeEngine/releases/latest)
-[![License](https://img.shields.io/github/license/loopy-iri/RatholeEngine?color=blue)](../LICENSE)
-[![Stars](https://img.shields.io/github/stars/loopy-iri/RatholeEngine?style=flat&color=16a34a)](https://github.com/loopy-iri/RatholeEngine/stargazers)
+[![CI](https://github.com/oldrcesupport/rathole-tunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/oldrcesupport/rathole-tunnel/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/oldrcesupport/rathole-tunnel?sort=semver&color=7c3aed)](https://github.com/oldrcesupport/rathole-tunnel/releases/latest)
+[![License](https://img.shields.io/github/license/oldrcesupport/rathole-tunnel?color=blue)](../LICENSE)
+[![Stars](https://img.shields.io/github/stars/oldrcesupport/rathole-tunnel?style=flat&color=16a34a)](https://github.com/oldrcesupport/rathole-tunnel/stargazers)
 <br/>
 ![shell](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)
 ![python](https://img.shields.io/badge/python-stdlib%20only-3776AB?logo=python&logoColor=white)
 ![tunnel](https://img.shields.io/badge/tunnel-rathole%20%2B%20nginx-7c3aed)
 
-[**English**](../README.md) · [**فارسی**](#این-چیست) · [**ویکی جامع (Wiki)**](https://github.com/loopy-iri/RatholeEngine/wiki) · [شروع سریع](#شروع-سریع) · [Telegram](https://t.me/l8PY4NET)
+[**English**](../README.md) · [**فارسی**](#این-چیست) · [**ویکی جامع (Wiki)**](https://github.com/oldrcesupport/rathole-tunnel/wiki) · [شروع سریع](#شروع-سریع) · [Telegram](https://t.me/l8PY4NET)
 
 </div>
 
@@ -110,7 +110,7 @@ ratholectl ip-cert-off                 # حذف vhost IP TLS
 
 > **نکتهٔ دستور نصب نود:** بعد از `ratholectl add <name> <inbound>` (و `ratholectl show <name>`)، **اول** یک دستور نصب آمادهٔ کپی به شکل curl یک‌خطی چاپ می‌شود که مستقیم روی نود خارج اجرا می‌شود، سپس شکل محلی `install-node.sh`:
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --node -- \
+> curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
 >   --server <panel>:443 --name <name> --token <T> --inbound-port <inbound>
 > ```
 > اگر دامنه‌ای ست نشده باشد (حالت تانل با IP)، `--server` با IP عمومی سرور پر می‌شود.
@@ -366,24 +366,24 @@ ratholectl proxy rm mysvc
 
 ### نصب تک‌کامانده از گیت‌هاب (curl | sudo bash)
 
-ساده‌ترین راه؛ آخرین بسته‌ی release را از گیت‌هاب می‌گیرد و نصاب را اجرا می‌کند. پیش‌فرض روی `loopy-iri/RatholeEngine` است — برای fork خودت متغیر `RATHOLE_GH` را ست کن:
+ساده‌ترین راه؛ آخرین بسته‌ی release را از گیت‌هاب می‌گیرد و نصاب را اجرا می‌کند. پیش‌فرض روی `oldrcesupport/rathole-tunnel` است — برای fork خودت متغیر `RATHOLE_GH` را ست کن:
 
 ```bash
 # کاملاً تعاملی (حالت پنل/نود و اطلاعات را می‌پرسد)
-curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash
 
 # سرور ایران (پنل) غیرتعاملی:
-curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --panel \
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel \
   --domain panel.example.ir \
   --fullchain /root/cert/panel.example.ir/fullchain.pem \
   --key       /root/cert/panel.example.ir/privkey.pem
 
 # نود خارج غیرتعاملی:
-curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --node -- \
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
   --server panel.example.ir:443 --name trk01 --token <T> --inbound-port 2087
 
 # آپدیت کامل (تشخیص خودکار پنل/نود/هاب، با snapshot + رولبک خودکار):
-curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --update
 ```
 
 > `install.sh` فایل‌های `rathole-manager.zip` و `bootstrap.sh` را از آخرین GitHub Release (که workflowِ release می‌سازد) دانلود می‌کند و بعد به `bootstrap.sh` تحویل می‌دهد. برای تغییر مخزن: `RATHOLE_GH="you/repo"`.
@@ -391,7 +391,7 @@ curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/instal
 > **نصب یک نسخه‌ی خاص:** با فلگ `--release` (اگر بدون آرگومان اجرا کنی، خودش می‌پرسد؛ Enter = آخرین نسخه):
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/loopy-iri/RatholeEngine/main/install.sh | sudo bash -s -- --release v1.8.0 --panel --domain ... --fullchain ... --key ...
+> curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --release v1.8.0 --panel --domain ... --fullchain ... --key ...
 > ```
 >
 > `--beta` آخرین pre-release و `--stable` آخرین نسخه‌ی پایدار را می‌گیرد. از روی سرورِ نصب‌شده: `ratholectl update v1.8.0` یا `ratholenode update v1.8.0`.
@@ -556,7 +556,7 @@ sudo bash uninstall-node.sh --purge --yes
 
 ## حمایت مالی
 
-اگر RatholeEngine برایتان مفید بوده، با یکی از روش‌های زیر از توسعه‌ی مستمر آن حمایت کنید:
+اگر rathole-tunnel برایتان مفید بوده، با یکی از روش‌های زیر از توسعه‌ی مستمر آن حمایت کنید:
 
 | شبکه | آدرس |
 |------|------|
