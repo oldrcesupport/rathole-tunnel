@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # common.sh — tavabe eshteraki beyn ratholectl, ratholenode va nsabha
 # in file tvst source frakhvani mishvd; be tnhaii ejra nemishavad.
 

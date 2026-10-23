@@ -4270,7 +4270,7 @@ rth_with_lock(){
       err "directory-e ghofl-e fallback yek symlink ast: $udir (fail-closed)."
       return 1
     fi
-    mkdir -m 700 -p "$udir" 2>/dev/null || true
+    mkdir -p "$udir" 2>/dev/null && chmod 700 "$udir" 2>/dev/null || true
     if [ -d "$udir" ] && [ -O "$udir" ] && [ ! -L "$udir" ]; then
       RTH_LOCK="${udir}/ratholectl.lock"
       lockdir="$udir"

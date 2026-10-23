@@ -308,7 +308,7 @@ validate_zip_archive(){
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      l*|"lrwx"*)
+      l*)
         err "validate_zip_archive: symlink dar zip mojaz nist: $line"
         rm -f "$tmp_list" 2>/dev/null
         return 1

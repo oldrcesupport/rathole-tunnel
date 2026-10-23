@@ -2285,7 +2285,8 @@ except Exception:
     # masir ra be backhaul-server proxy mikonad — pas probe bayad be '/channel' beravad.
     # token HATMAN lazem ast vagarna backhaul ba 401 rad mikonad. TLS/direct az transport miayad.
     backhaul)
-      local bhr="${BH_REMOTE_ADDR:-${BH_REMOTE:-$host}:443}" bhh="${bhr%%:*}" bhp="${bhr##*:}"
+      local bhr="${BH_REMOTE_ADDR:-${BH_REMOTE:-$host}:443}"
+      local bhh="${bhr%%:*}" bhp="${bhr##*:}"
       case "${BH_TRANSPORT:-wssmux}" in
         ws|wsmux) result="$(adaptive_probe_ws_plain "$bhh" "$bhp" "/channel" "Authorization: Bearer ${BH_TOKEN}"$'\r\n' 2>/dev/null)" ;;
         *) result="$(adaptive_probe_ws_tls "$bhh" "$bhp" "/channel" "Authorization: Bearer ${BH_TOKEN}"$'\r\n' 2>/dev/null)" ;;
@@ -2623,7 +2624,7 @@ rth_with_lock(){
       err "directory-e ghofl-e fallback yek symlink ast: $udir (fail-closed)."
       return 1
     fi
-    mkdir -m 700 -p "$udir" 2>/dev/null || true
+    mkdir -p "$udir" 2>/dev/null && chmod 700 "$udir" 2>/dev/null || true
     if [ -d "$udir" ] && [ -O "$udir" ] && [ ! -L "$udir" ]; then
       RTH_LOCK="${udir}/ratholenode.lock"
       lockdir="$udir"
