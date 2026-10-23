@@ -1,54 +1,28 @@
 # rathole-tunnel Wiki
 
-خوش آمدید به مستندات جامع و ویکی پروژه **rathole-tunnel**.
+به ویکی پروژه **rathole-tunnel** خوش آمدید — مدیریت تانل معکوس ایران ↔ خارج با هسته rathole، nginx ضدپروب و پنل وب RatholeHub. همه‌ی دستورها با نسخه **1.8.9** روی سرور واقعی تست شده‌اند.
 
-این سیستم یک راهکار **معکوس‌تونل (Reverse Tunnel)** پیشرفته و چندموقعیتی بر پایه‌ی **rathole + Nginx** برای عبور از فیلترینگ شدید است.
+## شروع سریع (۳ گام)
 
----
+```bash
+# ۱) پنل (ایران) — با دامنه و گواهی:
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel \
+  --domain panel.example.ir --fullchain <fc.pem> --key <key.pem>
 
-## 📚 فهرست صفحات ویکی (Wiki Index)
+# ۲) ساخت نود روی پنل + گرفتن دستور نصب:
+sudo ratholectl add trk01 2087 && sudo ratholectl token trk01
 
-1. 🚀 **[راهنمای شروع سریع (Getting Started)](Getting-Started)**
-   - نصب خودکار یک‌خطی
-   - گزینه‌های نصب (Panel / Node / Hub)
-   - پیش‌نیازها و معماری عمومی
+# ۳) اجرای دستور چاپ‌شده روی سرور خارج، سپس:
+sudo ratholectl doctor        # باید «node trk01 amade ast» ببینید
+```
 
-2. ⚡ **[راهنمای Adaptive Filtering (سوئیچ خودکار)](Adaptive-Filtering-Guide)**
-   - منطق سوئیچینگ هوشمند بین WebSocket و KCP
-   - آزمایش و عیب‌یابی لایه‌ای (Layered Probes)
-   - تنظیم فواصل، حد آستانه (Threshold) و Cooldown
-   - الزامات امنیتی و Sanitization
+سرور بدون دامنه؟ بعد از نصب: `sudo ratholectl ip-cert <IP>` و روی نود `--tls-trusted-root`.
 
-3. 📖 **[مرجع کامل دستورات CLI (CLI Reference)](CLI-Reference)**
-   - دستورات سرور ایران (`ratholectl`)
-   - دستورات نود خارج (`ratholenode`)
-   - مدیریت مسیر مخفی کنترلی (`control-path`)
-   - حامل‌ها: KCP، Plain، Noise، **Backhaul (SMUX)**، Direct-IP و Game/SNI
-   - آپدیت و کانال بتا (`update beta`)
+## صفحات ویکی
 
-4. 🖥️ **[مدیریت مرکزی با Hub (Hub Management)](Hub-Management)**
-   - نصب و کانفیگ پنل وب Hub (`hub.py`)
-   - راهنمای REST API و امنیت اتصال SSH
-   - آپدیت گروهی و مانیتورینگ لایو سرورها
-
-5. 🛠️ **[عیب‌یابی، بک‌آپ و رول‌بک (Troubleshooting)](Troubleshooting)**
-   - عیب‌یابی اتصالات و لاگ‌ها
-   - سیستم بک‌آپ خودکار قبل از آپدیت
-   - دستورات رول‌بک دکمه‌ای و دستی
-
-6. 📋 **[راهنماهای عملی (Workflow Guides)](Workflow-Guides)**
-   - راه‌اندازی دسترسی direct-IP
-   - مهاجرت از WebSocket به Backhaul (SMUX)
-   - اضافه کردن دامنه دوم
-   - اتصال نود به چند سرور ایران (multi-upstream)
-
----
-
-## 📜 لایسنس (License)
-
-پروژه تحت لایسنس **[AGPL-3.0-or-later](https://github.com/oldrcesupport/rathole-tunnel/blob/main/LICENSE)** به‌صورت متن‌باز منتشر شده است.
-
-نسخه‌های تا v1.7.0 تحت MIT منتشر شده بودند و همچنان تحت MIT در دسترس‌اند؛ از آن پس پروژه AGPL-3.0 است.
-نکته‌ی عملی (بند ۱۳ AGPL): اگر rathole-tunnel را تغییر دهید و دیگران از طریق شبکه با نسخه‌ی تغییریافته‌ی شما
-کار کنند (مثلاً پنل وب `ratholehub` را برایشان اجرا کنید)، باید سورس نسخه‌ی خود را به آن‌ها ارائه دهید.
-جزئیات در [NOTICE](https://github.com/oldrcesupport/rathole-tunnel/blob/main/NOTICE).
+* 🚀 **[راهنمای شروع سریع](Getting-Started)** — معماری، نصب، جدول پورت‌ها
+* 📖 **[مرجع کامل دستورات CLI](CLI-Reference)** — همه‌ی زیرفرمان‌های ratholectl و ratholenode
+* 🌐 **[مدیریت هاب](Hub-Management)** — پنل وب، API، provision، امنیت
+* 🔧 **[عیب‌یابی، بک‌آپ و رول‌بک](Troubleshooting)** — خطاهای واقعی و راه‌حل
+* 🧭 **[گردش‌کارها](Workflow-Guides)** — سناریوهای روزمره (سرویس جدید، تغییر ترنسپورت، مهاجرت، به‌روزرسانی)
+* 📖 **[راهنمای نصب کامل](../install-manual.fa.md)** · 🌐 **[هاب](../hub.md)** · 🏗️ **[معماری](../architecture.md)** · 🚦 **[حالت‌های ترنسپورت](../transport-modes.md)** · 📊 **[جریان ترافیک](../traffic-flow.md)**

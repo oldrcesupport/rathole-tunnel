@@ -1,4 +1,4 @@
-# Traffic Transport Modes — Comprehensive Reference (v1.8.7)
+# Traffic Transport Modes — Comprehensive Reference (v1.8.9)
 
 `rathole-manager` supports multiple underlying transport protocols to match different network environments and censorship severity levels. On each node, a single state variable (`TUNNEL`) dictates the active transport mode.
 

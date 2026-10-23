@@ -1,117 +1,184 @@
 # 🚀 Rathole Tunnel Manager (سامانه تانل معکوس ضدتحریم و گیمینگ)
 
-سیستم جامع و ماژولار مدیریت تانل معکوس پایدار و پرسرعت بین سرور ایران و سرور خارج، مجهز به دفاع فعال در برابر فیلترینگ و اسکنرهای هوشمند، پشتیبانی از پروتکل‌های وب‌گردی **WebSocket (WS)** و نسل نوین **XHTTP (SplitHTTP)**، حالت **گیمینگ فوق‌سریع لایه ۴ (0-RTT Vision + UDP FullCone)** و مهارکننده پکت‌لاس **KCP (UDP+FEC)** روی پورت ۴۴۳.
+مدیریت جامع و ماژولار تانل معکوس پایدار بین **سرور ایران (Panel)** و **سرور خارج (Node)** با هسته [rathole](https://github.com/rapiz1/rathole)، nginx با دفاع فعال ضدپروب، و پنل وب **RatholeHub**. تمام دستورها و سناریوهای این مستند روی جفت سرور واقعی (Ubuntu 24.04) تست شده‌اند.
 
-کاملاً بهینه‌سازی شده برای استقرار آسان در کنار پنل محبوب گرافیکی **سنایی ([3x-ui](https://github.com/MHSanaei/3x-ui))** و مدیریت متمرکز کاربران بدون نیاز به تغییر مستقیم هسته Xray.
+**نسخه فعلی:** v1.8.9 — [دانلود آخرین ریلیز](https://github.com/oldrcesupport/rathole-tunnel/releases/latest)
 
 ---
 
-## 📚 فهرست راهنماهای اختصاصی (Documentation)
+## 📚 فهرست مستندات
 
-| راهنما | فایل / مسیر | محتوا و کاربرد |
+| راهنما | فایل | محتوا |
 | :--- | :--- | :--- |
-| ⚡ **[راهنمای نصب سریع با گیت‌هاب](rathole-manager/docs/GITHUB_INSTALL_GUIDE.fa.md)** | `rathole-manager/docs/GITHUB_INSTALL_GUIDE.fa.md` | نصب تک‌خطی از گیت‌هاب، پیکربندی اینباندهای 3x-ui، آپدیت آنی |
-| 📦 **[راهنمای نصب دستی و آفلاین](rathole-manager/docs/MANUAL_INSTALL_GUIDE.fa.md)** | `rathole-manager/docs/MANUAL_INSTALL_GUIDE.fa.md` | نصب با فایل زیپ/آفلاین بدون وابستگی به اینترنت، مدیریت با اسکریپت |
-| 🧠 **[مرجع جامع فنی و معماری](rathole-manager/docs/SETUP_AND_GAMING_GUIDE.fa.md)** | `rathole-manager/docs/SETUP_AND_GAMING_GUIDE.fa.md` | معماری عمیق، ضدپروب Nginx، کانفیگ‌های پیشرفته Xray و تیونینگ سیستم |
-| 🏗️ **[مستندات معماری و ترانزیت](rathole-manager/docs/)** | `rathole-manager/docs/` | دیاگرام‌های تفصیلی، مشخصات پروتکل‌های ترانزیت، هاب و ویکی کامل |
+| 📖 **راهنمای نصب کامل (دستی + گیت‌هاب)** | [`docs/install-manual.fa.md`](rathole-manager/docs/install-manual.fa.md) | نصب گام‌به‌گام، جریان دامنه و IP، جدول پورت‌ها |
+| 🌐 **راهنمای هاب (پنل وب)** | [`docs/hub.md`](rathole-manager/docs/hub.md) | نصب، API، provision خودکار، امنیت |
+| 🖥️ **ویکی** | [`docs/wiki/Home.md`](rathole-manager/docs/wiki/Home.md) | مرجع CLI، عیب‌یابی، گردش‌کارها |
+| 🏗️ **معماری و ترانزیت** | [`docs/architecture.md`](rathole-manager/docs/architecture.md) | دیاگرام، جریان ترافیک، حالت‌های ترنسپورت |
 
 ---
 
-## ⚡ روش‌های نصب و راه‌اندازی (Installation)
+## ⚡ نصب سریع تک‌خطی
 
-### روش ۱: نصب تک‌خطی فوق‌سریع از گیت‌هاب (پیشنهادی)
+### ۱) سرور ایران (Panel)
 
-#### ۱. سرور ایران (Panel / Hub):
 ```bash
+# با دامنه و گواهی موجود:
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel \
+  --domain panel.example.ir \
+  --fullchain /root/cert/panel.example.ir/fullchain.pem \
+  --key /root/cert/panel.example.ir/privkey.pem
+
+# یا تعاملی (بدون آرگومان — دامنه/گواهی را می‌پرسد):
 curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --panel
 ```
-پس از نصب، گواهی SSL و پنل وب را فعال کنید:
+
+**سرور بدون دامنه (فقط IP):** نصب را با همان IP به‌جای دامنه انجام دهید و بعد از نصب گواهی self-signed اختصاصی بسازید:
+
 ```bash
-# دریافت SSL رایگان Let's Encrypt:
-sudo ratholectl cert iran.example.com admin@example.com
+sudo ratholectl ip-cert 213.0.113.10        # گواهی IP-SAN می‌سازد و vhost را سوییچ می‌کند
+sudo ratholectl ip-cert-show               # مسیر public cert برای trust روی نود
+```
 
-# بهینه‌سازی سرعت هسته لینوکس (BBR):
-sudo ratholectl tune
+**گواهی با certbot (دامنه → این سرور):**
 
-# فعال‌سازی پنل مدیریت وب RatholeHub:
+```bash
+sudo ratholectl cert panel.example.ir admin@example.ir
+```
+
+پنل وب (اختیاری، روی همان دامنه زیر `/hub/`):
+
+```bash
+sudo ratholectl hub on 2087      # ← https://panel.example.ir/hub/
+sudo ratholectl tune             # BBR + محدودیت‌های سیستم (رفع 502 زیر burst)
+```
+
+### ۲) سرور خارج (Node)
+
+روی پنل یک نود بسازید و دستور نصب نود را بگیرید:
+
+```bash
+sudo ratholectl add trk01 2087        # 2087 = پورت inbound (مثلاً Xray/3x-ui روی نود)
+sudo ratholectl token trk01           # دستور آماده‌ی نصب + توکن
+```
+
+روی سرور خارج دستور چاپ‌شده را اجرا کنید:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
+  --server panel.example.ir:443 --name trk01 --token <TOKEN> --inbound-port 2087
+```
+
+* نود با `--tls-hostname <دامنه>` گواهی پنل را با CA سیستم تأیید می‌کند (مسیر استاندارد دامنه‌دار).
+* در حالت IP: `--tls-hostname <IP-پنل> --tls-trusted-root /path/to/ip-cert.pem`
+* سپس روی نود، inbound واقعی (مثلاً VLESS-WS در 3x-ui) را روی `127.0.0.1:2087` با `path=/trk01` بسازید.
+
+### ۳) بررسی سلامت
+
+```bash
+sudo ratholectl doctor     # سرویس‌ها، پورت‌ها، اتصال نود، پروب کنترل — در شکست exit غیرصفر
+sudo ratholectl status     # داشبورد کامل
+ratholenode status         # وضعیت تونل از سمت نود
+```
+
+---
+
+## 🛠️ دستورات پرکاربرد
+
+```bash
+# ── پنل (ratholectl) ──
+sudo ratholectl ls                          # فهرست نودها
+sudo ratholectl add node2 10002             # نود جدید (پورت داده به‌صورت خودکار)
+sudo ratholectl token node2                 # دستور نصب نود + توکن
+sudo ratholectl rotate node2                # چرخش توکن (بعدش توکن سمت نود را به‌روز کنید)
+sudo ratholectl rename trk01 trk99          # تغییر نام/مسیر
+sudo ratholectl regen                       # بازتولید کانفیگ‌ها + reload
+sudo ratholectl logs 200 --bundle           # بسته لاگ کامل با redact توکن‌ها (امن برای پشتیبانی)
+
+# ── حالت‌های ترنسپورت (روی پنل + معادل روی نود) ──
+sudo ratholectl kcp on 443 balanced         # UDP+FEC شبیه QUIC — نود: ratholenode kcp on <iran-ip>:443 <KEY>
+sudo ratholectl noise on                    # Noise رمزنگاری‌شده بدون TLS/cert — نود: ratholenode noise on <ip>:2334 <pubkey>
+sudo ratholectl backhaul on                 # هسته Backhaul/SMUX پشت nginx/443 — نود: ratholenode backhaul on <domain> <TOKEN>
+sudo ratholectl plain on 8880               # WebSocket بدون TLS روی پورت جدا — نود: ratholenode plain on <ip>:8880
+sudo ratholectl direct on --port 8090 --header X-Cdn-Id   # مسیریابی هدر (بدون TLS)
+
+# هر سوییچ، snapshot می‌گیرد؛ در شکست خودکار rollback می‌شود.
+
+# ── نود (ratholenode) ──
+ratholenode ls                              # سرویس‌های همین تونل
+ratholenode add-svc trk01 <TOKEN> 2087      # سرویس جدید روی همان تونل
+ratholenode set-main <host:443> [tls_hostname] [trusted_root]
+ratholenode upstream add up2 <host:443> [tls_hostname]   # سرور ایران دوم/سوم
+ratholenode logs all 200 --bundle           # بسته لاگ نود (redact شده)
+ratholenode backup / restore                # پشتیبان‌گیری/بازیابی تنظیمات نود
+```
+
+---
+
+## 🌐 پنل وب RatholeHub
+
+```bash
 sudo ratholectl hub on 2087
 ```
-🌐 پنل تحت وب ایران: `https://iran.example.com/hub/`
 
-#### ۲. سرور خارج (Node) در کنار پنل ۳x-ui سنایی:
-روی سرور خارج:
-```bash
-# ۱. نصب پنل سنایی (3x-ui)
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
-
-# ۲. اتصال نود تانل معکوس به سرور ایران
-curl -fsSL https://raw.githubusercontent.com/oldrcesupport/rathole-tunnel/main/install.sh | sudo bash -s -- --node -- \
-  --server iran.example.com:443 --name node1 --token YOUR_NODE_TOKEN --inbound-port 10001
-```
+* آدرس: `https://<دامنه>/hub/` — فقط روی `127.0.0.1` گوش می‌دهد و پشت nginx با TLS قرار می‌گیرد.
+* ورود با رمز ادمین (PBKDF2-HMAC-SHA256)؛ کوکی `HttpOnly; SameSite=Strict` و پشت TLS با `Secure`.
+* مدیریت سرورها (افزودن/ویرایش/حذف + audit)، **provision خودکار** با رمز SSH (نصب کلید هاب + دیپلوی)، اکشن‌ها (show/restart/regen/logs/سوییچ ترنسپورت/...)، چرخش توکن، تغییر رمز (نشست‌های قبلی را بی‌اعتبار می‌کند).
+* جزئیات کامل: [`docs/hub.md`](rathole-manager/docs/hub.md)
 
 ---
 
-### روش ۲: نصب از طریق کلون گیت‌هاب (برای توسعه‌دهندگان)
+## 🔄 به‌روزرسانی و Rollback
 
 ```bash
-# کلون ریپازیتوری
-git clone https://github.com/oldrcesupport/rathole-tunnel.git /root/rathole-manager
-cd /root/rathole-manager
+# پنل یا نود — از هر نسخه‌ای:
+sudo ratholectl update stable          # یا: ratholenode update stable
+sudo ratholectl update v1.8.9          # نسخه مشخص
+sudo ratholectl update beta            # آخرین pre-release
 
-# سرور ایران:
-sudo bash install-panel.sh
-
-# سرور خارج:
-sudo bash install-node.sh
+# قبل از هر به‌روزرسانی snapshot کامل گرفته می‌شود؛ اگر health-check شکست بخورد
+# خودکار rollback می‌شود. بازگردانی دستی:
+sudo bash /opt/rathole-manager/update.sh --list-backups
+sudo bash /opt/rathole-manager/update.sh --rollback [timestamp]
 ```
 
----
-
-## 🛡️ ویژگی‌های برجسته امنیتی و فنی
-
-1. **دفاع فعال در برابر پروب و فیلترینگ (Active Probe Defense)**:
-   - درخواست‌های کاوشگر فیلترچی و ربات‌های اسکنر پورت به جای ارورهای مشکوک ۵۰۲ یا بسته بودن پورت، وب‌سایت شرکتی مدرن فارسی با کد وضعیت `200 OK` دریافت می‌کنند.
-   - جداسازی کامل و بدون بافر ترافیک واقعی WebSocket و XHTTP از ترافیک‌های کاوشگر.
-2. **پشتیبانی کامل از XHTTP (SplitHTTP)**:
-   - عبور استریم پیوسته با `chunked_transfer_encoding on` و حذف کامل بافرینگ برای عدم شناسایی توسط فایروال هوش مصنوعی.
-3. **حالت گیمینگ بدون تاخیر (L4 SNI Passthrough 0-RTT)**:
-   - عبور ترافیک مستقیم TCP/UDP بدون دخالت Nginx لایه ۷ با پروتکل `VLESS-Vision` و هندشیک رمزنگاری در سرور مقصد خارج.
-4. **مهار پکت‌لاس با KCP / UDP+FEC روی پورت 443**:
-   - شبیه‌سازی الگوی QUIC گوگل و ترمیم بسته‌های از دست رفته اینترنت بین‌الملل با الگوریتم Reed-Solomon.
-5. **معماری فوق امنیتی (Fail-Closed & Hardened)**:
-   - مجوزهای محدود `umask 077`، `0600` برای فایل‌ها و `0700` برای دایرکتوری‌ها.
-   - قفل‌های تراکنشی اتمیک در نوشتن کانفیگ‌ها و state.
-   - رمزنگاری پسورد پنل با الگوریتم امن **PBKDF2-HMAC-SHA256**.
-   - حذف کامل و اتوماتیک اطلاعات حساس (توکن‌ها، پسوردها و کلیدها) از لاگ‌های ممیزی و خروجی‌های سیستم.
-6. **بروزرسانی بدون قطعی (Zero-Downtime Reload)**:
-   - بروزرسانی سریع تنظیمات با `git pull` بدون قطع شدن کانکشن کاربران آنلاین.
+حذف کامل: `sudo bash /opt/rathole-manager/bootstrap.sh --uninstall` (و `--purge` برای حذف باینری/کانفیگ هاب).
 
 ---
 
-## 🛠️ دستورات پرکاربرد مدیریت سیستم (CLI)
+## 📋 پورت‌ها و پیش‌نیازها
 
-```bash
-# بررسی سلامت کامل سیستم و ارتباطات
-sudo ratholectl doctor
+| سرور | پورت | جهت | کاربرد |
+| :--- | :--- | :--- | :--- |
+| ایران | 443/tcp | عمومی | nginx TLS (کنترل + داده ws + هاب `/hub/` + proxy) |
+| ایران | 443/udp | عمومی | فقط در حالت KCP (kcptun) |
+| ایران | 2334/tcp | عمومی | فقط در حالت Noise |
+| ایران | 8880, 8090... | عمومی | فقط در حالت plain/direct |
+| ایران | 2333, 8080, 2096, 1001+، 8088 | فقط 127.0.0.1 | کنترل/فیک/ساب/داده/هاب — عمداً لوکال است |
+| خارج | 2087+ | فقط 127.0.0.1 | inbound های سرویس‌ها (Xray/3x-ui) |
+| خارج | خروجی HTTPS | — | اتصال به پنل (+ دانلود آپدیت) |
 
-# مشاهده وضعیت نودها و پورت‌های تانل
-sudo ratholectl status
-
-# افزودن یک نود جدید
-sudo ratholectl add node2 10002
-
-# دریافت توکن یک نود
-sudo ratholectl token node2
-
-# راه‌اندازی سرویس گیمینگ اختصاصی (لایه ۴)
-sudo ratholectl game add game1 10003 game.example.com
-
-# روشن کردن حالت ضد پکت‌لاس KCP روی پورت ۴۴۳
-sudo ratholectl kcp on 443 balanced
-
-# تولید مجدد کانفیگ‌ها و ریلود بدون قطعی
-sudo ratholectl regen
-```
+پیش‌نیاز: Ubuntu 20.04+ / Debian 11+ (x86_64 یا arm64)، دسترسی root. بسته‌های nginx/jq/certbot به‌صورت خودکار نصب می‌شوند؛ باینری rathole از بسته (با تأیید checksum) نصب می‌شود.
 
 ---
-*توسعه داده شده جهت ایجاد دسترسی پایدار، امن و پرسرعت به اینترنت آزاد.*
+
+## 🛡️ ویژگی‌های امنیتی (تست‌شده)
+
+* رمزهای عبور با **PBKDF2-HMAC-SHA256** (۱۰۰k iteration + salt) — ارتقای خودکار از هش‌های قدیمی در اولین ورود.
+* کوکی نشست: `HttpOnly; SameSite=Strict` + `Secure` پشت TLS؛ HMAC نشست به رمز گره خورده — **تغییر رمز همه نشست‌ها را بی‌اعتبار می‌کند**.
+* محدودیت ورود: ۵ تلاش ناموفق در ۳۰۰ ثانیه per-IP (اتمیک، مقاوم به race) → 429.
+* `umask 077` + فایل‌های state/token با `0600`؛ نوشتن اتمیک کانفیگ‌ها با قفل + rollback.
+* اعتبارسنجی سخت‌گیرانه ورودی‌ها (نام، توکن hex، پورت 1-65535، دامنه/مسیر بدون متاکاراکتر nginx) و آرشیوهای tar/zip ضد path-traversal/symlink.
+* redaction کامل توکن/کلید در `logs` و `logs --bundle` (شامل کلید خصوصی Noise و کلید kcptun).
+* دفاع ضدپروب: بازدیدکننده عادی و اسکنر به‌جای 502، صفحه‌ی شرکتی `200 OK` می‌بینند.
+
+## ⚠️ محدودیت‌های شناخته‌شده
+
+* listener اصلی 443 فقط IPv4 است (plain/direct دو-استک‌اند).
+* `control-path rotate` دوره گذار ندارد — بعد از rotate باید نودها را به‌روز کنید.
+* توکن API هاب (Bearer) تاریخ انقضا ندارد؛ فقط با rotate باطل می‌شود. کوکی نشست ۲۴ ساعته است.
+* پورت‌های داده روی پنل فقط `127.0.0.1` هستند (عمدی) — مصرف بیرونی فقط از مسیر nginx/443.
+* دانلود از mirrorهای ghproxy (برای دورزدن فیلترینگ) same-origin است؛ checksum ریلیز در مسیر آپدیت راستی‌آزمایی می‌شود ولی امضای PGP وجود ندارد.
+
+## 🧾 مجوزها
+
+هسته rathole و kcptun/backhaul مجوزهای پروژه‌های خود را دارند؛ کد مدیریت تحت مجوز پروژه — [`rathole-manager/LICENSE`](rathole-manager/LICENSE) و [`rathole-manager/NOTICE`](rathole-manager/NOTICE).
