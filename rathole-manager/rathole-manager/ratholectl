@@ -3124,46 +3124,18 @@ cmd_fakeweb(){
   local action="${1:-}" port="${2:-}"
   if [ -z "$port" ] && [ -f "$STATE" ]; then port="$(s_get '.fake_port' 2>/dev/null)"; fi
   case "$port" in ''|null) port=8000 ;; esac
-  case "$action" in
-    start)
-      command -v python3 >/dev/null 2>&1 || die "python3 nasb nist (apt install -y python3)."
-      # hoshdar tadakhol: agar chiz digari (panel vaghai) rooye in port ast, fik ra ainja start nakon
-      if ss -ltnH "sport = :$port" 2>/dev/null | grep -q . ; then
-        warn "chizi az ghabl rooye 127.0.0.1:$port gvsh midhd; agar panel vaghai ast, fakeweb lazem nist."
-      fi
-      mkdir -p /var/www/rathole-fake
-      rth_write_fakeweb_html /var/www/rathole-fake
-      cat > /etc/systemd/system/${PANEL_FAKEWEB_SVC}.service <<UNIT
-[Unit]
-Description=rathole panel fake web (default site on fake_port)
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 -m http.server ${port} --bind 127.0.0.1 --directory /var/www/rathole-fake
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-      systemctl daemon-reload
-      systemctl enable ${PANEL_FAKEWEB_SVC} >/dev/null 2>&1 || true
-      if systemctl restart ${PANEL_FAKEWEB_SVC}; then
-        if systemctl is-active --quiet ${PANEL_FAKEWEB_SVC}; then
-          log "sait fik panel rooye 127.0.0.1:${port} bala amad (rfa 502 rooye /)."
-        else
-          die "service ${PANEL_FAKEWEB_SVC} restart shod vali active nist; journalctl -u ${PANEL_FAKEWEB_SVC} -n 30 --no-pager"
-        fi
-      else
-        die "restart-e ${PANEL_FAKEWEB_SVC} shekast khord; journalctl -u ${PANEL_FAKEWEB_SVC} -n 30 --no-pager"
-      fi
-      ;;
-    stop)   systemctl stop ${PANEL_FAKEWEB_SVC} 2>/dev/null && log "motevaghef shod." || warn "ejra naboodan." ;;
-    rm)     systemctl disable --now ${PANEL_FAKEWEB_SVC} 2>/dev/null || true
-            rm -f /etc/systemd/system/${PANEL_FAKEWEB_SVC}.service; systemctl daemon-reload; log "hazf shod." ;;
-    status) systemctl --no-pager status ${PANEL_FAKEWEB_SVC} | sed -n '1,8p' || true ;;
-    *) die "estefade: ratholectl fakeweb <start|stop|rm|status> [port]" ;;
-  esac
+  # MOHEM (anti-fingerprint): handler-e `python3 -m http.server`-e khm POST/OPTIONS ra ba 501
+  # javab midad va masir-haye namovjood ra 404 — dare in server-e fik ra be-sehr bar-maloom mikond
+  # (sayt-e vaghei POST mipazirad va masir-e eshtebah → 200 ye safheh-ye asli). pas AZ HANDLER-e
+  # SAFI-e fakeweb_service (common.sh) estefade mishavad: hame-ye method-ha → safheh-e asli (200).
+  if [ "$action" = "start" ]; then
+    command -v python3 >/dev/null 2>&1 || die "python3 nasb nist (apt install -y python3)."
+    if ss -ltnH "sport = :$port" 2>/dev/null | grep -q . ; then
+      warn "chizi az ghabl rooye 127.0.0.1:$port gvsh midhd; agar panel vaghai ast, fakeweb lazem nist."
+    fi
+  fi
+  fakeweb_service "${PANEL_FAKEWEB_SVC}" "$port" "${action:-status}"
+  return 0
 }
 
 # ---------- tune: BBR + limithaye system va nginx (rfa 502 zir burst) ----------

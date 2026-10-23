@@ -7,7 +7,7 @@ umask 077
 
 # noskhe-ye rathole-manager (panel/node/hub). moqe-e release in adad ba tag hamahang mishavad.
 # package.sh/CI mitavanad in ra be tag-e vaghei stamp konad; agar dast taghir dadi، bedoon 'v' bezar.
-MANAGER_VERSION="1.9.0"
+MANAGER_VERSION="1.9.1"
 
 c_g(){ printf '\033[1;32m%s\033[0m' "$*"; }
 c_r(){ printf '\033[1;31m%s\033[0m' "$*"; }
@@ -471,8 +471,16 @@ RestartSec=2
 WantedBy=multi-user.target
 UNIT
       systemctl daemon-reload
-      systemctl enable --now "$svc" >/dev/null 2>&1
-      log "web fik ($svc) rooye 127.0.0.1:${port} bala amad." ;;
+      systemctl enable "$svc" >/dev/null 2>&1 || true
+      # restart (na faghat enable --now): agar ghablan dasht ejra mishavad, bayad ba
+      # server.py-e jadid bargardad — gheyr-in soorat handler-e ghadimi zende mimanad.
+      systemctl restart "$svc" >/dev/null 2>&1 || true
+      if systemctl is-active --quiet "$svc"; then
+        log "web fik ($svc) rooye 127.0.0.1:${port} bala amad."
+      else
+        err "web fik ($svc) bala niamad; journalctl -u $svc -n 30 --no-pager"
+        return 1
+      fi ;;
     stop)   systemctl stop "$svc" 2>/dev/null && log "motevaghef shod." || warn "ejra naboodan." ;;
     rm)     systemctl disable --now "$svc" 2>/dev/null || true; rm -f "/etc/systemd/system/${svc}.service"; systemctl daemon-reload; log "hazf shod." ;;
     status) systemctl --no-pager status "$svc" | sed -n '1,8p' || true ;;
