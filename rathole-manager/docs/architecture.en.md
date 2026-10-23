@@ -1,4 +1,4 @@
-# System Architecture — Three Roles, Core Principles & Security Hardening (v1.8.6)
+# System Architecture — Three Roles, Core Principles & Security Hardening (v1.8.7)
 
 `rathole-manager` is a production-grade, modular, and hardened reverse tunnel management system built on **rathole + Nginx**. An edge relay in Iran (fronted by a single domain, valid TLS certificate, and port 443) multiplexes traffic to multiple external nodes connected via reverse tunnels.
 
