@@ -1639,6 +1639,29 @@ regenerate(){
     fi
 
     if [ "$nginx_reloaded" -eq 1 ]; then
+      # VERIFICATION-E VAGHEI: `nginx -s reload` hatta vaghti bind-e listener jadid shekast
+      # mishavad (maslan port-e mojood-e fakeweb) rc=0 midahad va ba config-e GHADIMI be kar
+      # edame midad. pas listener-haye TCP-e marbut be in config ra ba ss check miknim —
+      # gheyr-in soorat «plain/direct on» movafaghiat-e dorogh report mikard.
+      # (bedoon-e ss — sistem-e nadir — check rad mishavad, mesl-e ghabl.)
+      if command -v ss >/dev/null 2>&1; then
+        local bind_bad=0 bind_p
+        for bind_p in $(jq -r '[.plain_port, .direct_port] | map(select(. != null)) | .[]' "$STATE" 2>/dev/null); do
+          if ! ss -ltnH "sport = :$bind_p" 2>/dev/null | grep -q .; then
+            err "listener-e nginx rooye port $bind_p BIND NASHOD (tadakhol ba service-e digar؟) — config-e ghadimi hanooz faal ast."
+            bind_bad=1
+          fi
+        done
+        if [ "$bind_bad" -eq 1 ]; then
+          if _rollback_configs; then
+            err "config ghabli ba movafaghiat bazgardande shod."
+          else
+            err "bazgardandan-e config ghabli shekast khord."
+          fi
+          _cleanup_snapshots
+          return 1
+        fi
+      fi
       log "nginx reload shod va faal ast."
       cp -a "$out" "$out.rathole-good.bak" 2>/dev/null || true
       [ -f "$STREAM_CONF" ] && cp -a "$STREAM_CONF" "$STREAM_CONF.rathole-good.bak" 2>/dev/null || true
@@ -3234,7 +3257,17 @@ cmd_plain(){
     on)
       port="${port:-8880}"
       echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      is_valid_port "$port" || die "port namotabar: $port (bayad 1 ta 65535 bashad)."
       [ "$port" = "443" ] && die "port 443 baraye halat TLS rezerv ast; port-e digari (masalan 8880) bede."
+      # jelogiri az tadakhol ba listener-haye mojood-e TCP-e khod-e panel: ghablan `plain on 8080`
+      # ba fakeweb (fake_port=8080 pishfrz) BMKHORD, bind-e nginx bi-seda shekast mishod va
+      # «movafaghiat» report mishod (nginx reload rc=0 midahad hatta ba bind-e shekast).
+      local coll
+      for coll in fake_port sub_port hub_port direct_port; do
+        local op; op="$(jq -r ".${coll} // empty" "$STATE" 2>/dev/null)"
+        [ -n "$op" ] && [ "$op" != null ] && [ "$op" = "$port" ] && \
+          die "port $port tdlakh-e $coll ist ($op); port-e digari entekhab kon."
+      done
       local pre_st_bak=""
       if [ -f "$STATE" ]; then
         pre_st_bak="$(rth_mktemp)" || die "sakht snapshot-e state shekast khord."
@@ -3320,9 +3353,17 @@ cmd_direct(){
       done
       port="${port:-8081}"; header="${header:-X-Cdn-Id}"
       echo "$port" | grep -qE '^[0-9]+$' || die "port bayad adad bashad."
+      is_valid_port "$port" || die "port namotabar: $port (bayad 1 ta 65535 bashad)."
       [ "$port" = "443" ] && die "port 443 baraye masir-e TLS/game rezerv ast; port-e digari (masalan 8081) bede."
       local internal; internal="$(jq -r '.internal_port // 8443' "$STATE" 2>/dev/null)"
       [ "$port" = "$internal" ] && die "port $port ba internal_port-e game/SNI tadakhol darad; port-e digari bede."
+      # tadakhol-e listener-haye TCP-e panel (hamsan-e ghayeed-e plain on)
+      local coll
+      for coll in fake_port sub_port hub_port plain_port; do
+        local op; op="$(jq -r ".${coll} // empty" "$STATE" 2>/dev/null)"
+        [ -n "$op" ] && [ "$op" != null ] && [ "$op" = "$port" ] && \
+          die "port $port tdlakh-e $coll ist ($op); port-e digari entekhab kon."
+      done
       echo "$header" | grep -qE '^[A-Za-z0-9-]{1,40}$' || die "header faghat hrvf/adad/khttirh (-) mjaz ast."
       local pre_st_bak=""
       if [ -f "$STATE" ]; then

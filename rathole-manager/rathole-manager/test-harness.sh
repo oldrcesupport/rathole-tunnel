@@ -112,6 +112,15 @@ nginx(){
   fi
   return 0
 }
+# mock-e ss: listener-e fake-bar migardanad (bind-e movafagh) magar FAIL_SS_BIND=1
+# fault-injection roshan bashad — baraye test-e bind-verification-e regenerate.
+ss(){
+  if [ "\${1:-}" = "-ltnH" ] && [ -n "\${FAIL_SS_BIND:-}" ] && [ "\${FAIL_SS_BIND}" != "0" ]; then
+    return 1
+  fi
+  echo "LISTEN 0 511 0.0.0.0:FAKE *  users:((mock))"
+  return 0
+}
 systemctl(){
   if [ "\${SYSTEMCTL_NOT_FOUND:-0}" = "1" ]; then
     return 127
@@ -849,6 +858,17 @@ EOF
 grep -qE "[[:space:]](\./)?bootstrap\.sh$" "$TEST_SUMS"
 rc=$?
 assert_eq "$rc" "1" "manifest-e naghes (bedoon bootstrap.sh) bayad rad shavad"
+
+line "tst 41: Bind verification — nginx listener bind failure fails closed and rolls back"
+PRE_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+PRE_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+FAIL_SS_BIND=1 bash "$RUN" cmd_plain on 8899 >/dev/null 2>&1
+rc=$?
+assert_eq "$rc" "1" "cmd_plain on ba shekast-e bind-e listener bayad fail shavad"
+POST_STATE_SHA="$(sha256sum "$STATE_FILE" | cut -d' ' -f1)"
+POST_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
+assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json pas az shekast-e bind rollback shod"
+assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf pas az shekast-e bind rollback shod"
 
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"
