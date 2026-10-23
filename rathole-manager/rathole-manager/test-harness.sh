@@ -870,6 +870,50 @@ POST_CONF_SHA="$(sha256sum "$CONF_FILE" | cut -d' ' -f1)"
 assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json pas az shekast-e bind rollback shod"
 assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf pas az shekast-e bind rollback shod"
 
+line "tst 42: UDP game forwarding — server.toml type=udp + public bind"
+bash "$RUN" cmd_udp add game1 25000 >/dev/null 2>&1
+rc=$?
+assert_ok "$rc" "cmd_udp add ejra shod"
+grep -qE '^\[server\.services\.game1\]' "$TOML_FILE"
+assert_ok $? "udp game block dar server.toml hast"
+grep -qE 'type = "udp"' "$TOML_FILE"
+assert_ok $? "type=udp dar server.toml ast"
+grep -qE 'bind_addr = "0.0.0.0:25000"' "$TOML_FILE"
+assert_ok $? "bind-e omomi 0.0.0.0:25000 ast"
+if bash "$RUN" cmd_udp add game1 25000 >/dev/null 2>&1; then
+  assert_ok 1 "name-e tekrari-e udp bayad rad mishod"
+else
+  assert_ok 0 "name-e tekrari rad shod"
+fi
+
+line "tst 43: anti-fingerprint — control path probe-e bedoon WS → decoy (na 404)"
+if grep -q 'return 404' "$CONF_FILE"; then
+  assert_ok 1 "masir-e kontrol nabayad 404 bedahad (eshtibah-e motamayez)"
+else
+  assert_ok 0 "control path probe-e bedoon-e WS ra be decoy mifrestad (proxy_pass fake)"
+fi
+
+line "tst 44: node add-udp — client.toml type=udp"
+# cmd_apply/apply be node.env va services.conf niaz darad (dar jarian-e asli hamesh vojood darand)
+[ -f "$ROOT/etc/rathole/node.env" ] || echo "SERVER=btli.ir:443" > "$ROOT/etc/rathole/node.env"
+[ -f "$ROOT/etc/rathole/services.conf" ] || echo "trk01|aaaaaaaaaaaaaaaa|2087" > "$ROOT/etc/rathole/services.conf"
+if bash "$RUN_NODE" cmd_add_udp game1 a1b2c3d4e5f6a7b8 2090 >/dev/null 2>&1; then
+  assert_ok 0 "cmd_add_udp ejra shod"
+else
+  assert_ok 1 "cmd_add_udp ejra shod"
+fi
+grep -qE '^\[client\.services\.game1\]' "$ROOT/etc/rathole/client.toml"
+assert_ok $? "udp block dar client.toml hast"
+grep -A4 '^\[client\.services\.game1\]' "$ROOT/etc/rathole/client.toml" | grep -q 'type = "udp"'
+assert_ok $? "type=udp dar client.toml ast"
+if bash "$RUN_NODE" cmd_rm_udp game1 >/dev/null 2>&1; then
+  assert_ok 0 "cmd_rm_udp ejra shod"
+else
+  assert_ok 1 "cmd_rm_udp ejra shod"
+fi
+grep -qE '^\[client\.services\.game1\]' "$ROOT/etc/rathole/client.toml"
+if [ $? -ne 0 ]; then assert_ok 0 "udp block hazf shod"; else assert_ok 1 "udp block hazf nashod"; fi
+
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"
 echo "=============================================="

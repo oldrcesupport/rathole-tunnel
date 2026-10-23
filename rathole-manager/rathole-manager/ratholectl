@@ -661,6 +661,19 @@ gen_server_toml(){
         echo
       fi
     done
+    # gme-ye UDP: type="udp" (schema-e tajrabi-e rathole 0.5.1-fork — Dar HAR DO tarraf test shode).
+    # bind-e OMOOMI (0.0.0.0) chon gamer-ha mostaghiman be <iran-ip>:<port>/udp mizanand;
+    # nginx dar masir-e UDP nist va monaseb-e bazi ast (algu-ye QUIC).
+    jq -r '(.udp_games // [])[] | [.name,(.port|tostring),.token] | @tsv' "$STATE" 2>/dev/null | \
+    while IFS=$'\t' read -r u_name u_port u_token; do
+      u_name="${u_name%$'\r'}"; u_port="${u_port%$'\r'}"; u_token="${u_token%$'\r'}"
+      [ -n "$u_name" ] && [ -n "$u_port" ] && [ -n "$u_token" ] || continue
+      echo "[server.services.${u_name}]"
+      echo "token = \"${u_token}\""
+      echo "bind_addr = \"0.0.0.0:${u_port}\""
+      echo "type = \"udp\""
+      echo
+    done
   } > "$SERVER_TOML.tmp"
   rth_commit_config "$SERVER_TOML.tmp" "$SERVER_TOML"
 }
@@ -1032,7 +1045,9 @@ ${hub_block}
 ${bh_block}
 ${proxy_block}
     location = ${ctrl_path} {
-        if (\$http_upgrade != "websocket") { return 404; }
+        # anti-fingerprint (algu-ye ShadowTLS/Trojan): probe-e bedoon-e WS hamande sayt-e fik (200)
+        # mishavad — hich masiri dar site 404-e motamayez nadarad (cm: masir-e khabar shode ham bi-sima ast).
+        if (\$http_upgrade != "websocket") { proxy_pass http://127.0.0.1:${fake}; }
         proxy_pass http://127.0.0.1:${ctrl};
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1109,7 +1124,9 @@ ${bh_block}
 ${proxy_block}
     # rishh: tfkik sait fik az channel kontroli ba hdr Upgrade
     location = ${ctrl_path} {
-        if (\$http_upgrade != "websocket") { return 404; }
+        # anti-fingerprint (algu-ye ShadowTLS/Trojan): probe-e bedoon-e WS hamande sayt-e fik (200)
+        # mishavad — hich masiri dar site 404-e motamayez nadarad (cm: masir-e khabar shode ham bi-sima ast).
+        if (\$http_upgrade != "websocket") { proxy_pass http://127.0.0.1:${fake}; }
         proxy_pass http://127.0.0.1:${ctrl};
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -1273,7 +1290,9 @@ ${hub_block}
 ${bh_block}
 ${proxy_block}
     location = ${ctrl_path} {
-        if (\$http_upgrade != "websocket") { return 404; }
+        # anti-fingerprint (algu-ye ShadowTLS/Trojan): probe-e bedoon-e WS hamande sayt-e fik (200)
+        # mishavad — hich masiri dar site 404-e motamayez nadarad (cm: masir-e khabar shode ham bi-sima ast).
+        if (\$http_upgrade != "websocket") { proxy_pass http://127.0.0.1:${fake}; }
         proxy_pass http://127.0.0.1:${ctrl};
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -2074,6 +2093,81 @@ ensure_stream_include(){
 }
 
 # ratholectl game add <name> <node_tls_inbound_port> <sni>
+# ---------- gme-ye UDP: forwarding-e UDP-e bazi az tarigh-e tunnel (gamer → <iran-ip>:<port>/udp → node) ----------
+# schema-e tajrabi: rathole 0.5.1-fork `type = "udp"` ra dar services-e mamuli mipazirad (Dar HAR DO
+# tarraf ba config-e testi tasdig shode). bind-e server OMOOMI ast (0.0.0.0) — nginx dar masir-e UDP nist.
+cmd_udp(){
+  need_root; need_bin jq; ensure_state
+  local sub="${1:-ls}"; shift || true
+  case "$sub" in
+    add)
+      local name="${1:-}" port="${2:-}"
+      [ -n "$name" ] && [ -n "$port" ] || die "estefade: ratholectl udp add <name> <public_udp_port>"
+      echo "$name" | grep -qE '^[A-Za-z0-9_-]{1,40}$' || die "name namotabar (faghat harf/adad/_/-)."
+      is_valid_port "$port" || die "port namotabar ($port) — bayad 1 ta 65535 bashad."
+      [ "$port" = "443" ] && die "port 443/udp baraye kcp rezerv ast; port-e digari bede."
+      local dup
+      dup="$(jq -r --arg n "$name" '([.nodes[].name] + [(.udp_games//[])[].name]) | index($n) != null' "$STATE" 2>/dev/null)"
+      [ "$dup" = "true" ] && die "nam '$name' az ghabl vojood darad."
+      dup="$(jq -r --arg p "$port" '([.nodes[].port|tostring, (.api_local_port//0|tostring)] + [(.udp_games//[])[].port|tostring] + [(.kcp_port//0|tostring),(.noise_port//0|tostring)]) | index($p) != null' "$STATE" 2>/dev/null)"
+      [ "$dup" = "true" ] && die "port $port az ghabl estefade shode (node/kcp/noise)."
+      local token; token="$(openssl rand -hex 16 2>/dev/null || head -c16 /dev/urandom | xxd -p 2>/dev/null | tr -d '\n')"
+      [ -n "$token" ] || die "tolid-e token shekast khord (openssl/xxd)."
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || die "sakht-e snapshot shekast khord."
+        cp -a "$STATE" "$pre_st_bak" || { rm -f "$pre_st_bak"; die "copy-e snapshot shekast khord."; }
+      fi
+      if ! rth_state_tx --arg n "$name" --arg p "$port" --arg t "$token" \
+           '.udp_games = ((.udp_games // []) + [{name:$n, port:($p|tonumber), token:$t}])'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "sabt-e udp game shekast khord."
+      fi
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "faalsazi-e udp game shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+      # firewall BA'D az movafaghiat-e transaction (hamsan-e plain/direct)
+      warn "firewall: port UDP $port ra baz kon (masalan: ufw allow $port/udp)."
+      command -v ufw >/dev/null 2>&1 && ufw allow "$port/udp" >/dev/null 2>&1 || true
+      log "udp game '$name' faal shod: <iran-ip>:$port/udp → node."
+      echo "rooye node:  ratholenode add-udp $name $token <inbound_udp_port>"
+      echo "mamulan haman port-e TCP-e bazi ra ham ba 'add' ezafe kon (lobby/matchmaking)."
+      ;;
+    rm)
+      local name="${1:-}"
+      [ -n "$name" ] || die "estefade: ratholectl udp rm <name>"
+      local pre_st_bak=""
+      if [ -f "$STATE" ]; then
+        pre_st_bak="$(rth_mktemp)" || return 1
+        cp -a "$STATE" "$pre_st_bak" || return 1
+      fi
+      if ! rth_state_tx --arg n "$name" '.udp_games = ((.udp_games // []) | map(select(.name != $n)))'; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf-e udp game shekast khord."
+      fi
+      if ! regenerate "$pre_st_bak"; then
+        [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+        die "hazf-e udp game shekast khord va rollback shod."
+      fi
+      [ -n "$pre_st_bak" ] && rm -f "$pre_st_bak" 2>/dev/null || true
+      log "udp game '$name' hazf shod."
+      ;;
+    ls|*)
+      local cnt; cnt="$(jq '(.udp_games//[])|length' "$STATE" 2>/dev/null)"
+      echo "NAME           UDP-PORT   TOKEN"
+      echo "-----------------------------------"
+      if [ "${cnt:-0}" != "0" ]; then
+        jq -r '(.udp_games//[])[] | [.name,(.port|tostring),(.token[0:8]+"…")] | @tsv' "$STATE" 2>/dev/null | \
+        while IFS=$'\t' read -r n p t; do printf '%-14s %-10s %s\n' "$n" "$p" "$t"; done
+      else
+        echo "(khali — 'ratholectl udp add <name> <port>' va 'ratholenode add-udp ...')"
+      fi
+      ;;
+  esac
+}
+
 cmd_game(){
   need_root; need_bin jq; ensure_state
   local sub="${1:-}"; shift || true
@@ -4298,6 +4392,9 @@ dstvrha:
   proxy <add <name> <http(s)://host:port>|rm <name>|ls>   reverse-proxy-e gheyre-tunnel: /<name>/ rooye haman 443 be yek upstream-e delkhah (baraye tunnel/service-haye kastom)
   game add <name> <inbound> <sni>   service game (SNI rooye 443, TLS rooye node)
 
+  udp add <name> <port>        gme-ye UDP: forwarding-e UDP az tarigh tunnel (bind-e omomi 0.0.0.0:<port>/udp)
+  udp rm <name> | ls           mdirit service-haye UDP — node: ratholenode add-udp <name> <token> <inbound>
+
   game rm <name> | ls | show <name> | cert <sni>   mdirit service game va gvahi
   restart                      restart kamel rathole-server (tunnelha lhzhai ghat)
   enable                       faalsazi va start rathole-server
@@ -4397,6 +4494,7 @@ main(){
 
     control-path) cmd_control_path "${1:-show}" "$@" ;;
     game)   cmd_game "$@" ;;
+    udp)    shift; cmd_udp "$@" ;;
     restart)
       need_root
       if systemctl restart "$RATHOLE_SVC"; then

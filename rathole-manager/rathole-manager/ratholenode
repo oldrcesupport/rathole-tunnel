@@ -225,6 +225,7 @@ safe_svc_del(){
 if [ "${RATHOLE_TEST_MODE:-0}" = "1" ] && [ -n "${RTH_TEST_DIR:-}" ]; then
   ENV_FILE="${ENV_FILE:-$RTH_TEST_DIR/etc/rathole/node.env}"
   SVC_FILE="${SVC_FILE:-$RTH_TEST_DIR/etc/rathole/services.conf}"
+  UDP_FILE="${UDP_FILE:-$RTH_TEST_DIR/etc/rathole/udp.conf}"
   CLIENT_TOML="${CLIENT_TOML:-$RTH_TEST_DIR/etc/rathole/client.toml}"
   KCP_CLI_UNIT="${KCP_CLI_UNIT:-$RTH_TEST_DIR/etc/systemd/system/rathole-kcp-client.service}"
   SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-$RTH_TEST_DIR/etc/systemd/system}"
@@ -233,6 +234,7 @@ if [ "${RATHOLE_TEST_MODE:-0}" = "1" ] && [ -n "${RTH_TEST_DIR:-}" ]; then
 else
   ENV_FILE="${ENV_FILE:-/etc/rathole/node.env}"
   SVC_FILE="${SVC_FILE:-/etc/rathole/services.conf}"
+  UDP_FILE="${UDP_FILE:-/etc/rathole/udp.conf}"
   CLIENT_TOML="${CLIENT_TOML:-/etc/rathole/client.toml}"
   KCP_CLI_UNIT="${KCP_CLI_UNIT:-/etc/systemd/system/rathole-kcp-client.service}"
   SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
@@ -358,6 +360,25 @@ gen_client(){
       echo "local_addr = \"127.0.0.1:${inbound}\""
       echo "type = \"tcp\""
     done < "$SVC_FILE"
+    # gme-ye UDP: haman schema-e services ba type="udp" (tajrabi-tasdig-shode rooye 0.5.1-fork).
+    # dar /etc/rathole/udp.conf format «name|token|port» ast (joda az TCP ta parser-haye ghadimi nakanand).
+    if [ -f "$UDP_FILE" ]; then
+      while IFS='|' read -r name token inbound; do
+        [ -n "$name" ] || continue
+        case "$name" in \#*) continue ;; esac
+        token="${token%$'\r'}"; inbound="${inbound%$'\r'}"
+        if [ -z "$token" ] || ! echo "$inbound" | grep -qE '^[0-9]+$'; then
+          warn "khatt-e namotabar dar udp.conf rad shod (name=$name)."
+          continue
+        fi
+        emitted_services=$((emitted_services + 1))
+        echo
+        echo "[client.services.${name}]"
+        echo "token = \"${token}\""
+        echo "local_addr = \"127.0.0.1:${inbound}\""
+        echo "type = \"udp\""
+      done < "$UDP_FILE"
+    fi
     if [ "$emitted_services" -eq 0 ]; then
       echo
       echo "[client.services]"
@@ -472,6 +493,38 @@ cmd_rm_svc(){
   cmd_apply
 }
 
+# ---------- gme-ye UDP (type="udp" — tajrabi-tasdig-shode rooye rathole 0.5.1-fork) ----------
+udp_exists(){ grep -qE "^$1\|" "$UDP_FILE" 2>/dev/null; }
+
+cmd_add_udp(){
+  need_root
+  local name="${1:-}" token="${2:-}" inbound="${3:-}"
+  [ -n "$name" ] && [ -n "$token" ] && [ -n "$inbound" ] || die "estefade: ratholenode add-udp <name> <token> <inbound_udp_port>   (az khorooji-e 'ratholectl udp add' rooye panel)"
+  valid_svc_name "$name" || die "name namotabar."
+  valid_svc_token "$token" || die "token namotabar (faghat [A-Za-z0-9._=+/-] mjaz ast)."
+  is_valid_port "$inbound" || die "inbound port namotabar ($inbound)."
+  check_port_conflict "$inbound" "udp service '$name'" "$name" || warn "ba vojood tadakhol adamh midhim."
+  touch "$UDP_FILE"; chmod 600 "$UDP_FILE"
+  if udp_exists "$name"; then
+    warn "udp service '$name' vojood dard; beroozresani mishavad."
+    safe_svc_del "$UDP_FILE" "$name"
+  fi
+  echo "${name}|${token}|${inbound}" >> "$UDP_FILE" || die "neveshtan-e $UDP_FILE shekast khord."
+  log "udp service '$name' → 127.0.0.1:$inbound/udp ezafe shod."
+  cmd_apply
+}
+
+cmd_rm_udp(){
+  need_root
+  local name="${1:-}"
+  [ -n "$name" ] || die "estefade: ratholenode rm-udp <name>"
+  valid_svc_name "$name" || die "name namotabar."
+  udp_exists "$name" || die "udp service '$name' peyda nashod."
+  safe_svc_del "$UDP_FILE" "$name"
+  log "udp service '$name' hazf shod."
+  cmd_apply
+}
+
 cmd_ls(){
   [ -f "$SVC_FILE" ] || { warn "hich srvisi nist."; return; }
   load_env
@@ -482,6 +535,14 @@ cmd_ls(){
     [ -n "$name" ] || continue; case "$name" in \#*) continue ;; esac
     printf '%-16s %-10s %s\n' "$name" "$inbound" "${token:0:8}…"
   done < "$SVC_FILE"
+  if [ -f "$UDP_FILE" ] && [ -s "$UDP_FILE" ]; then
+    echo
+    echo "UDP (game):"
+    while IFS='|' read -r name token inbound; do
+      [ -n "$name" ] || continue; case "$name" in \#*) continue ;; esac
+      printf '%-16s %-10s %s\n' "$name" "$inbound" "${token:0:8}…"
+    done < "$UDP_FILE"
+  fi
 }
 
 cmd_set(){
@@ -2032,6 +2093,7 @@ cmd_backup(){
   local items=()
   [ -f "$ENV_FILE" ] && items+=("${ENV_FILE#/}")
   [ -f "$SVC_FILE" ] && items+=("${SVC_FILE#/}")
+  [ -f "$UDP_FILE" ] && items+=("${UDP_FILE#/}")
   load_env
   [ -n "${TLS_TRUSTED_ROOT:-}" ] && [ -f "$TLS_TRUSTED_ROOT" ] && items+=("${TLS_TRUSTED_ROOT#/}")
   [ -d "$UP_DIR" ] && items+=("${UP_DIR#/}")
@@ -2201,7 +2263,9 @@ ratholenode — mdirit klaint rathole (chnd service rooye yek tunnel)
 
   apply                          baztolid client.toml + check + restart
   add-svc <name> <token> <port>  afzoodan service be haman tunnel
+  add-udp <name> <token> <port>  gme-ye UDP: forwarding-e UDP az tarigh tunnel (token az 'ratholectl udp add')
   rm-svc  <name>                 hazf service
+  rm-udp  <name>                 hazf service-e UDP
   ls                             list serviceha
   set <SERVER|TLS_HOSTNAME|TLS_TRUSTED_ROOT|RATHOLE_VERSION> <v>  taghir tanzim paih
   set-main <server:port> [tls_hostname] [trusted_root]  dial + SNI + public CA atomik
@@ -2655,6 +2719,8 @@ main(){
     apply)   cmd_apply ;;
     add-svc) shift; cmd_add_svc "${1:-}" "${2:-}" "${3:-}" ;;
     rm-svc)  shift; cmd_rm_svc "${1:-}" ;;
+    add-udp) shift; cmd_add_udp "${1:-}" "${2:-}" "${3:-}" ;;
+    rm-udp)  shift; cmd_rm_udp "${1:-}" ;;
     ls)      cmd_ls ;;
     set)     shift; cmd_set "${1:-}" "${2:-}" ;;
     set-main) shift; cmd_set_main "${1:-}" "${2:-}" "${3:-}" ;;

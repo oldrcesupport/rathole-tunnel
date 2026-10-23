@@ -7,7 +7,7 @@ umask 077
 
 # noskhe-ye rathole-manager (panel/node/hub). moqe-e release in adad ba tag hamahang mishavad.
 # package.sh/CI mitavanad in ra be tag-e vaghei stamp konad; agar dast taghir dadi، bedoon 'v' bezar.
-MANAGER_VERSION="1.8.9"
+MANAGER_VERSION="1.9.0"
 
 c_g(){ printf '\033[1;32m%s\033[0m' "$*"; }
 c_r(){ printf '\033[1;31m%s\033[0m' "$*"; }
@@ -433,16 +433,25 @@ import http.server, socketserver, sys, os
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 os.chdir('/var/www/rathole-fake')
 class H(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
+    def _resolve(self):
         f = self.translate_path(self.path)
         if not os.path.exists(f) or os.path.isdir(f):
             self.path = '/index.html'
+    def do_GET(self):
+        self._resolve()
         return super().do_GET()
     def do_HEAD(self):
-        f = self.translate_path(self.path)
-        if not os.path.exists(f) or os.path.isdir(f):
-            self.path = '/index.html'
+        self._resolve()
         return super().do_HEAD()
+    # anti-fingerprint: sayt-e vaghei POST/OPTIONS/... ra mipazirad; 501-e SimpleHTTPRequestHandler
+    # yek eshgarh-e vahih ast (scanner-e methode-ha ra miskanad). hame method-ha sayt-e fik ra midahand.
+    def do_POST(self):
+        self._resolve()
+        return super().do_GET()
+    do_PUT = do_POST
+    do_PATCH = do_POST
+    do_DELETE = do_POST
+    do_OPTIONS = do_POST
     def log_message(self, format, *args):
         pass
 with socketserver.TCPServer(('127.0.0.1', port), H) as httpd:
