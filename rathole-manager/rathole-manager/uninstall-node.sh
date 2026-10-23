@@ -57,6 +57,17 @@ for s in /etc/systemd/system/rathole-client@*.service; do
   systemctl disable --now "$u" 2>/dev/null || true
   rm -f "$s"
 done
+# instans-haye kcp-e upstream-ha (rathole-kcp-up-<id>): ghablan HAZF NEMISHODAND va ba'd az
+# «uninstall» kcptun-e faal (UDP tunnel-e faal be Iran) mimmnd va ba boot ham barmigasht.
+for s in /etc/systemd/system/rathole-kcp-up-*.service; do
+  [ -f "$s" ] || continue
+  u="$(basename "$s")"
+  systemctl disable --now "$u" 2>/dev/null || true
+  rm -f "$s"
+done
+# fakeweb ( Restart=always darad; bedoon-e in python3-e faal mimmnd)
+systemctl disable --now rathole-fakeweb 2>/dev/null || true
+rm -f /etc/systemd/system/rathole-fakeweb.service
 # client-e backhaul (agar roshan shode bood)
 systemctl disable --now rathole-backhaul-client 2>/dev/null || true
 rm -f /etc/systemd/system/rathole-backhaul-client.service
@@ -65,8 +76,11 @@ systemctl daemon-reload 2>/dev/null || true
 
 # ---------- hazf config va state ----------
 log "hazf config va state-haye node dar /etc/rathole..."
+# adaptive-state.json / failover.state: esm-haye VAGHEI (ghablan adaptive.state hazf mishod ke
+# esm-e eshtebah bood va file-e vaziat baqi mimand).
 rm -f /etc/rathole/client.toml /etc/rathole/node.env /etc/rathole/services.conf \
-      /etc/rathole/backhaul-client.toml /etc/rathole/adaptive.env /etc/rathole/adaptive.state \
+      /etc/rathole/backhaul-client.toml /etc/rathole/adaptive.env /etc/rathole/adaptive-state.json \
+      /etc/rathole/failover.state /etc/rathole/adaptive.state \
       /etc/rathole/watchdog.env
 rm -rf /etc/rathole/upstreams
 if [ -d /etc/rathole ] && [ -z "$(ls -A /etc/rathole 2>/dev/null)" ]; then rmdir /etc/rathole; fi
@@ -86,6 +100,14 @@ fi
 # ---------- purge ekhtiari ----------
 if [ "$PURGE" -eq 1 ]; then
   if ask_yn "bainri /usr/local/bin/rathole hazf shvd?"; then rm -f /usr/local/bin/rathole; fi
+  # kcptun + web-fak + gozaresh-haye mvaqet-e tst: dar purge hazf mishavand.
+  rm -f /usr/local/bin/kcptun-client /usr/local/bin/kcptun-server
+  systemctl disable --now rathole-panel-fakeweb 2>/dev/null || true
+  rm -f /etc/systemd/system/rathole-panel-fakeweb.service /etc/systemd/system/rathole-fakeweb.service
+  systemctl daemon-reload 2>/dev/null || true
+  rm -rf /var/www/rathole-fake
+  rm -f /run/kcptest-*.pid /var/log/kcptest-*.log 2>/dev/null || true
+  [ -d /etc/rathole ] && [ -z "$(ls -A /etc/rathole 2>/dev/null)" ] && rmdir /etc/rathole
 fi
 
 echo

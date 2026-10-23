@@ -20,6 +20,8 @@ PORT="${HUB_PORT:-8088}"
 
 BUNDLE_DIR="$APP_DIR/bundle"
 mkdir -p "$APP_DIR" "$CONF_DIR" "$BUNDLE_DIR"
+# CONF_DIR shamel token/ramz/kelid-e SSH ast → 0700 (moshtarak ba umask-e hub).
+chmod 700 "$CONF_DIR" 2>/dev/null || true
 install -m755 "$SCRIPT_DIR/hub.py" "$APP_DIR/hub.py"
 # hubcmds.py (naghshe-ye action→argv، bakhsh-e amniati) va asset-haye UI joda hastand
 # va HATMAN bayad kenar-e hub.py nasb shavand، vagarna hub bala nemiayad / UI khali ast.
@@ -42,7 +44,11 @@ log "bundle baraye deploy amade shod: $BUNDLE_DIR"
 
 # tvlid config fght agar naboodan (ta token/ramz mojood pak nshvd)
 if [ ! -f "$CONF_DIR/config.json" ]; then
-  API_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c24 /dev/urandom | xxd -p | tr -d '\n')"
+  API_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c24 /dev/urandom | xxd -p 2>/dev/null | tr -d '\n')"
+  # fail-closed: agar hala openssl va xxd ham nabashand, API_TOKEN khali mishavad va
+  # `Authorization: Bearer ` (khali) dar hub compare_digest("","")=True mishod —
+  # dastresi-e kamel-e gheyr-mojaz. pas bedoon-e token EJRA NEMISHAVAD.
+  [ -n "$API_TOKEN" ] || die "nemitoonam token-e amn tolid konam (openssl/xxd peyda nshod). python3 nasb ast: sudo apt install -y openssl xxd"
   # ramz ra tty-safe bekhan (zir-e curl|bash ya ejra az ratholectl، stdin momken ast pipe bashad).
   # `[ -r /dev/tty ]` DOROGH migoyad (device hamishe readable ast hatta bedoon-e controlling
   # terminal) — pas VAGHEAN bazesh mikonim. timeout ham lazem ast vagarna terminal-e
@@ -53,14 +59,26 @@ if [ ! -f "$CONF_DIR/config.json" ]; then
     read -rst "${RTH_READ_TIMEOUT:-300}" -p "ramz mdirit panel ra vared kon: " PW </dev/tty; echo
   fi
   [ -n "$PW" ] || die "ramz khali nemishavad (bedoon tty؟ dasti ejra kon: sudo bash install-hub.sh)."
-  PWHASH="$(printf '%s' "$PW" | sha256sum | cut -d' ' -f1)"
+  # hash-e PBKDF2-HMAC-SHA256 (100k iter + salt-e tasadofi) — haman format-e hub.py.
+  # ghablan sha256-e sade (bi-salt) neveshte mishod; hub dar avvalin login upgrade mikard vali
+  # nasb-e taze nabayad az ebteda rooye hash-e zaif bashand.
+  PWHASH="$(python3 - "$PW" <<'PYEOF'
+import sys, hashlib, secrets
+pw = sys.argv[1].encode("utf-8")
+salt = secrets.token_hex(16)
+dk = hashlib.pbkdf2_hmac("sha256", pw, salt.encode("utf-8"), 100000)
+print(f"pbkdf2:sha256:100000:{salt}:{dk.hex()}")
+PYEOF
+)" || die "tolid-e hash-e PBKDF2 ba khata movajeh shod."
+  # ramz az hafeze-ye shell/var raft; faghat hash zakhire mishavad.
+  unset PW
   cat > "$CONF_DIR/config.json" <<EOF
 {
   "api_token": "$API_TOKEN",
-  "admin_password_sha256": "$PWHASH",
+  "admin_password_hash": "$PWHASH",
   "listen_host": "127.0.0.1",
   "listen_port": $PORT,
-  "ssh_key_path": "/root/.ssh/id_ed25519",
+  "ssh_key_path": "$CONF_DIR/id_ed25519",
   "ssh_opts": ["-o","BatchMode=yes","-o","ConnectTimeout=8","-o","StrictHostKeyChecking=accept-new"],
   "bundle_dir": "$BUNDLE_DIR"
 }
@@ -101,10 +119,15 @@ else
 fi
 
 # ---------- kelid SSH baraye atsal hab be serverha ----------
-KEY=/root/.ssh/id_ed25519
+# MOHEM: kilid DAR HAMIN CONF_DIR sakhte mishavad (na /root/.ssh) — haman masiri ke
+# config.json ssh_key_path negah midarad. ghablan masir-ha mokhalef boodand va
+# ensure_hub_key() dar avvalin provision kilid-e DIGARI dar /etc/ratholehub misakht va
+# tamame etslat-e SSH bi-seda be kilid-e jadid mireftid (server-haye ghabli mishkastand).
+KEY="$CONF_DIR/id_ed25519"
 if [ ! -f "$KEY" ]; then
-  mkdir -p /root/.ssh; chmod 700 /root/.ssh
   ssh-keygen -t ed25519 -N "" -f "$KEY" -C "ratholehub@$(hostname)" >/dev/null
+  chmod 600 "$KEY" 2>/dev/null || true
+  chmod 644 "$KEY.pub" 2>/dev/null || true
   log "kelid SSH hab sakhte shod: $KEY"
 else
   log "kelid SSH mojood estefade mishavad: $KEY"
@@ -147,8 +170,10 @@ cat <<NGINX
       proxy_pass http://127.0.0.1:${PORT}/;
       proxy_set_header Host \$host;
       proxy_set_header X-Real-IP \$remote_addr;
+      proxy_set_header X-Forwarded-Proto \$scheme;
   }
 NGINX
 echo "$(c_g '───────────────────────────────')"
+echo "$(c_y 'X-Forwarded-Proto ELZAMI ast:') bedoon-e in, hub flag-e Secure rooye cookie-e nshst nemigozarad va cookie az kanal-e HTTP-e ghayr-ramz dobare ferestade mishavad."
 echo "pish-niaz: az in server be baghie serverha SSH ba kelid st bashad (ssh-copy-id root@<node>)."
 echo "SSH-agente service ndard; agar kelid ramz dard, dar config masir ssh_key_path bdh."

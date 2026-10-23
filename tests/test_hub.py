@@ -5,6 +5,7 @@ import tempfile
 import shutil
 import hashlib
 import json
+import time
 
 # Add ratholehub directory to path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -210,6 +211,142 @@ class TestValidationHelpers(unittest.TestCase):
         self.assertFalse(hubcmds.is_valid_endpoint("example.com"))
         self.assertFalse(hubcmds.is_valid_endpoint(""))
         self.assertFalse(hubcmds.is_valid_endpoint(None))
+
+
+class TestSessionAndAuth(unittest.TestCase):
+    """Regression: session invalidation on password/token change + empty-token auth bypass (audit F1/F4)."""
+    def setUp(self):
+        self.cfg = {"api_token": "a" * 48, "admin_password_hash": hub.hash_password("pw")}
+
+    def test_session_roundtrip(self):
+        tok = hub.make_session_token(self.cfg)
+        self.assertTrue(hub.check_session(self.cfg, tok))
+
+    def test_session_invalid_after_password_change(self):
+        tok = hub.make_session_token(self.cfg)
+        cfg2 = dict(self.cfg)
+        cfg2["admin_password_hash"] = hub.hash_password("newpw")
+        self.assertFalse(hub.check_session(cfg2, tok),
+                         "stolen session cookie must die after password change")
+
+    def test_session_invalid_after_token_rotation(self):
+        tok = hub.make_session_token(self.cfg)
+        cfg2 = dict(self.cfg)
+        cfg2["api_token"] = "b" * 48
+        self.assertFalse(hub.check_session(cfg2, tok))
+
+    def test_check_session_rejects_garbage(self):
+        self.assertFalse(hub.check_session(self.cfg, "not-a-token"))
+        self.assertFalse(hub.check_session(self.cfg, ""))
+        self.assertFalse(hub.check_session(self.cfg, "abc." + "A" * 200))
+        self.assertFalse(hub.check_session(self.cfg, "1." + "\xff\xfe"))
+
+    def test_authed_rejects_empty_api_token(self):
+        # audit F1: config-e kharab ba api_token="" — ghablan `Authorization: Bearer `
+        # (khali) compare_digest("","")=True mishod = dastresi-e kamel.
+        cfg = {"api_token": "", "admin_password_hash": hub.hash_password("pw")}
+        self.assertFalse(hub.authed(cfg, {"Authorization": "Bearer "}, {}))
+        self.assertFalse(hub.authed(cfg, {}, {}))
+        self.assertFalse(hub.authed({}, {}, {}))
+
+    def test_authed_bearer_roundtrip(self):
+        self.assertTrue(hub.authed(self.cfg, {"Authorization": "Bearer " + self.cfg["api_token"]}, {}))
+        self.assertFalse(hub.authed(self.cfg, {"Authorization": "Bearer " + "c" * 48}, {}))
+
+    def test_authed_non_ascii_bearer_no_crash(self):
+        # audit F9: header-e gheyr-ASCII ghablan TypeError midad va thread-e darkhast
+        # bedoone pasokh mimord (DoS-e arzan).
+        headers = {"Authorization": "Bearer tükenmiş-ключ-توکن"}
+        try:
+            ok = hub.authed(self.cfg, headers, {})
+        except TypeError:
+            self.fail("non-ASCII Authorization header raised TypeError instead of 401")
+        self.assertFalse(ok)
+
+
+class TestLoginRateLimiter(unittest.TestCase):
+    """Regression: TOCTOU race in login_allowed/login_record_fail (audit F3) + unbounded dict (F10)."""
+    def setUp(self):
+        self._saved = dict(hub._LOGIN_FAILS)
+        hub._LOGIN_FAILS.clear()
+
+    def tearDown(self):
+        hub._LOGIN_FAILS.clear()
+        hub._LOGIN_FAILS.update(self._saved)
+
+    def test_consume_allows_up_to_max_then_blocks(self):
+        ip = "198.51.100.7"
+        for _ in range(hub._LOGIN_MAX):
+            self.assertTrue(hub.login_consume_attempt(ip))
+        self.assertFalse(hub.login_consume_attempt(ip))
+
+    def test_reset_clears_attempts(self):
+        ip = "198.51.100.8"
+        for _ in range(hub._LOGIN_MAX):
+            hub.login_consume_attempt(ip)
+        hub.login_reset(ip)
+        self.assertTrue(hub.login_consume_attempt(ip))
+
+    def test_window_expiry(self):
+        ip = "198.51.100.9"
+        hub._LOGIN_FAILS[ip] = [time.time() - hub._LOGIN_WINDOW - 1]
+        self.assertTrue(hub.login_consume_attempt(ip), "expired attempts must not block")
+
+    def test_distinct_ips_independent(self):
+        self.assertTrue(hub.login_consume_attempt("198.51.100.10"))
+        self.assertTrue(hub.login_consume_attempt("198.51.100.11"))
+
+    def test_bounded_memory_prunes_stale_ips(self):
+        orig_max = hub._LOGIN_FAILS_MAX_IPS
+        hub._LOGIN_FAILS_MAX_IPS = 10
+        try:
+            now = time.time()
+            for i in range(15):
+                hub._LOGIN_FAILS["10.255.%d.%d" % (i // 256, i % 256)] = [now - hub._LOGIN_WINDOW - 5]
+            self.assertTrue(hub.login_consume_attempt("198.51.100.12"))
+            stale = [k for k, v in hub._LOGIN_FAILS.items()
+                     if k.startswith("10.255.") and v and now - v[-1] >= hub._LOGIN_WINDOW]
+            self.assertEqual(stale, [], "stale IPs must be pruned once the map grows")
+        finally:
+            hub._LOGIN_FAILS_MAX_IPS = orig_max
+
+
+class TestEmptyTokenInsecureFlag(unittest.TestCase):
+    def test_empty_api_token_marked_insecure(self):
+        test_dir = tempfile.mkdtemp()
+        orig_conf, orig_mock = hub.CONF_PATH, hub.MOCK
+        try:
+            conf = os.path.join(test_dir, "config.json")
+            with open(conf, "w", encoding="utf-8") as f:
+                json.dump({"api_token": "", "admin_password_hash": "pbkdf2:x"}, f)
+            hub.CONF_PATH = conf
+            hub.MOCK = False
+            cfg = hub.get_config()
+            self.assertTrue(cfg.get("_insecure"),
+                            "empty api_token must be flagged insecure so startup warning fires")
+        finally:
+            hub.CONF_PATH = orig_conf
+            hub.MOCK = orig_mock
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+
+class TestSSHPortRange(unittest.TestCase):
+    """Regression: RE_PORT accepted 0 and 99999 into inventory (audit F6)."""
+    def test_provision_rejects_out_of_range_ports(self):
+        for bad in ("0", "65536", "99999", "abc", ""):
+            res = hub.provision_server({"name": "pt01", "role": "node", "host": "1.2.3.4",
+                                        "ssh_user": "root", "ssh_port": bad,
+                                        "ssh_password": "x"})
+            self.assertEqual(res.get("rc"), 1, f"ssh_port={bad!r} must be rejected")
+
+    def test_provision_valid_port_passes_field_validation(self):
+        # rc!=1 mishe vali nabayad «field-haye namotabar» bashe (validation-e port rad nashavad);
+        # ghabl az harkat-e SSH khata migirand chon host-e testi dastresi nadarad.
+        res = hub.provision_server({"name": "pt02", "role": "node", "host": "1.2.3.4",
+                                    "ssh_user": "root", "ssh_port": "2222",
+                                    "ssh_password": "x"})
+        self.assertNotIn("namotabar", str(res.get("err", "")),
+                         "port 2222 must pass field validation")
 
 
 class TestConfigAndKeyHandling(unittest.TestCase):

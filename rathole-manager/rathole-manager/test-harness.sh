@@ -221,7 +221,9 @@ chmod +x "$RUN_NODE"
 line(){ echo "=============================================="; echo "$*"; echo "=============================================="; }
 
 line "tst 1: init gheyre-taamoli"
-bash "$RUN" cmd_init --domain btli.ir --fullchain /tmp/fc.pem --key /tmp/key.pem
+# fail-closed-e jadid-e gen_nginx_conf masir-e gvahi-ra check mikond → file-ha dar sandbox sakhte mishavand
+touch "$ROOT/etc/rathole/fc.pem" "$ROOT/etc/rathole/key.pem"; chmod 600 "$ROOT/etc/rathole/fc.pem" "$ROOT/etc/rathole/key.pem"
+bash "$RUN" cmd_init --domain btli.ir --fullchain "$ROOT/etc/rathole/fc.pem" --key "$ROOT/etc/rathole/key.pem"
 assert_ok $? "cmd_init ejra shod"
 
 line "tst 2: afzoodan se node (usa01 ba api)"

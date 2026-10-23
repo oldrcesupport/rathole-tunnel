@@ -445,7 +445,7 @@ sudo bash install-hub.sh          # رمز مدیریت می‌پرسد، API TO
 - کپی `ratholectl`/`ratholenode`/`update.sh`/… به `/opt/ratholehub/bundle/` (برای deploy از راه دور)
 - تولید `/etc/ratholehub/config.json` (شامل `api_token`، هشِ رمز مدیریت، مسیر کلید SSH) و `inventory.json` خالی
 - یونیت `ratholehub.service` روی `127.0.0.1:8088` (متغیر `HUB_PORT` قابل تغییر)
-- ساخت کلید SSH هاب: `/root/.ssh/id_ed25519`
+- ساخت کلید SSH هاب: `/etc/ratholehub/id_ed25519`
 
 > `config.json` شامل توکن و هش رمز است؛ `chmod 600` می‌شود و **نباید** جایی commit یا لو برود.
 
@@ -455,9 +455,9 @@ sudo bash install-hub.sh          # رمز مدیریت می‌پرسد، API TO
 
 ```bash
 # روی سرور هاب:
-ssh-copy-id -i /root/.ssh/id_ed25519.pub -p 22 root@<server_ip>
+ssh-copy-id -i /etc/ratholehub/id_ed25519.pub -p 22 root@<server_ip>
 # تست:
-ssh -i /root/.ssh/id_ed25519 root@<server_ip> 'ratholenode show || ratholectl ls'
+ssh -i /etc/ratholehub/id_ed25519 root@<server_ip> 'ratholenode show || ratholectl ls'
 ```
 
 ### ۵.۳ دسترسی به پنل

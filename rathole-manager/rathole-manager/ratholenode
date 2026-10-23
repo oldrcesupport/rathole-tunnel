@@ -81,6 +81,12 @@ validate_hostname(){
 validate_kcp_key(){
   local k="${1:-}"
   [ -n "$k" ] || return 1
+  # footgun-e shayea: argoman-e profile be jay-e key (kcp on IP:PORT balanced). kcptun har
+  # string-i ra mipazirad → key-e "balanced" rooye node ba KEY-e hex-e Iran MATCH nemishavad
+  # va tunnel BI-SEDA mishkanad. in khatay-e mashhor rad mishavad; key-e gheyr-hex ham hoshdar midahad.
+  case "$k" in
+    balanced|lossy|aggressive) err "kcp key namotabar: '$k' profile ast na key. tartib: kcp on <ip:port> <KEY> [profile]" ; return 1 ;;
+  esac
   case "$k" in
     *$'\n'*|*$'\r'*|*[\;\|\&\`\$\<\>\(\)\'\"\\]*) return 1 ;;
   esac
@@ -380,6 +386,13 @@ restart_svc(){
 
 # hot-reload: fght agar service khamoosh bood start miknd; dar ghir ainsvrt rathole khodesh config ra mikhanad (bedoon ghati)
 reload_svc(){
+  # MOHEM (halat-e backhaul): 'backhaul on' rathole-client ra KHAMOOSH mikond (jaygozin-e kamel-e
+  # tunnel ast). agar injja enable/start mishod, do tunnel-e movazi faal mishod (rathole + backhaul)
+  # va update.sh health-check ham rathole-client «nagensht» mipandid → rollback-haye ghalat.
+  if [ "${TUNNEL:-ws}" = "backhaul" ]; then
+    log "TUNNEL=backhaul faal ast; client.toml regen shod vali $SVC khamoosh mimanad (backhaul-client tunnel ra edare mikonad)."
+    return 0
+  fi
   if ! command -v systemctl >/dev/null 2>&1; then
     err "systemctl peyda nashod؛ $SVC reload nashod."
     return 1
@@ -411,8 +424,16 @@ cmd_apply(){
 
   fi
   gen_client
-  reload_svc
-  log "client.toml ba $(grep -cvE '^\s*(#|$)' "$SVC_FILE" 2>/dev/null || echo 0) service rooye yek tunnel sakhte shod."
+  # MOHEM: khorooji-e reload_svc ghablan NADIDE migereft va akharin log hamishe rc=0 midad —
+  # 'apply'/'add-svc'/'set' movafaghiat-e ghalat report mikardand (tunnel down, exit 0) va
+  # guard-e `|| warn` dar update.sh ham hamishe dead-code bood.
+  if reload_svc; then
+    log "client.toml ba $(grep -cvE '^\s*(#|$)' "$SVC_FILE" 2>/dev/null || echo 0) service rooye yek tunnel sakhte shod."
+    return 0
+  else
+    err "apply shekast khord: tunnel bala niamad (khorooji-e bala ra bebin)."
+    return 1
+  fi
 }
 
 svc_exists(){ grep -qE "^$1\|" "$SVC_FILE" 2>/dev/null; }
@@ -435,7 +456,7 @@ cmd_add_svc(){
     warn "service '$name' vojood dard; beroozresani mishavad."
     safe_svc_del "$SVC_FILE" "$name"
   fi
-  echo "${name}|${token}|${inbound}" >> "$SVC_FILE"
+  echo "${name}|${token}|${inbound}" >> "$SVC_FILE" || die "neveshtan-e $SVC_FILE shekast khord (faza-e disk/mojaveziat?)."
   log "service '$name' → 127.0.0.1:$inbound ezafe shod (haman tunnel)."
   cmd_apply
 }
@@ -491,7 +512,7 @@ cmd_set(){
   # node.env agar hanoz nist (node-e taze az hub provision-shode, ghabl az install-node/curl)
   # ra bساز — 'set SERVER' khodesh bootstrap-e tunnel-e asli ast, pas nabayad ba «node.env
   # peyda nashod» die konad. az env_set (ke touch mikonad) estefade mikonim.
-  env_set "$key" "$val"
+  env_set "$key" "$val" || die "neveshtan-e $ENV_FILE shekast khord (faza-e disk/mojaveziat?)."
   log "tanzim shod: $key = $val"
   # faghat vaghti hadaghal yek service tarif shode apply kon; vagarna SERVER zakhire mishavad
   # va baad az afzoodan-e avalin service (add-svc / sim-keshi az hub) tunnel sakhte mishavad.
@@ -605,7 +626,17 @@ _logs_all_body(){
   ss -ltnp 2>/dev/null | rth_redact || true
 
   rth_file_dump "node.env"             "$ENV_FILE"      120
-  rth_file_dump "services.conf"        "$SVC_FILE"      120
+  # MOHEM: services.conf format «name|token|inbound» darad — rth_redact faghat JSON/TOML/env
+  # ra mishnasad va in format az dir-e an migozarad. bundle baraye paste kardan dar chat/issue
+  # ast; bedoon-e in redact, tamame token-ha cleartext kharej mishod.
+  rth_sec "services.conf ($SVC_FILE)"
+  if [ -f "$SVC_FILE" ]; then
+    head -n 120 "$SVC_FILE" 2>/dev/null \
+      | sed -E 's/^([^#|]+)\|[^|]*\|([^|]*)$/\1|***REDACTED***|\2/' \
+      | rth_redact || true
+  else
+    echo "NIST"
+  fi
   rth_file_dump "client.toml"          "$CLIENT_TOML"   300
   rth_file_dump "backhaul-client.toml" "/etc/rathole/backhaul-client.toml" 120
 
@@ -763,11 +794,13 @@ cmd_kcp_on(){
   fi
   log "kcp-client faal shod: $local_ep → UDP $remote (profile: $profile)."
 
-  # switch tunnel be kcp va baztolid client.toml
-  env_set TUNNEL kcp
-  env_set KCP_LOCAL "$local_ep"
-  env_set KCP_REMOTE "$remote"
-  env_set KCP_PROFILE "$profile"
+  # switch tunnel be kcp va baztolid client.toml. env_set-ha CHECK mishavand: agar neveshtan-e
+  # env shekast bokhorad va bi-seda edame midad, gen_client env-e GHADIMI ra mikhad → tunnel-e
+  # WS faal mishod vali log migoft «kcp switch shod» (mosir-e asli-ye kcp/block-shode bod).
+  env_set TUNNEL kcp || { _kcp_on_rollback; err "env_set TUNNEL shekast khord"; return 1; }
+  env_set KCP_LOCAL "$local_ep" || { _kcp_on_rollback; err "env_set KCP_LOCAL shekast khord"; return 1; }
+  env_set KCP_REMOTE "$remote" || { _kcp_on_rollback; err "env_set KCP_REMOTE shekast khord"; return 1; }
+  env_set KCP_PROFILE "$profile" || { _kcp_on_rollback; err "env_set KCP_PROFILE shekast khord"; return 1; }
   if ! gen_client || ! restart_svc; then
     _kcp_on_rollback
     err "baztolid-e client ya restart-e $SVC shekast khord؛ amaliat rollback shod."
@@ -918,6 +951,8 @@ cmd_noise_on(){
   echo "$remote" | grep -qE '^[^:]+:[0-9]+$' || die "adres bayad be shkl IP:PORT bashad (masalan 1.2.3.4:2334)."
   is_valid_port "${remote##*:}" || die "port-e remote namotabar (${remote##*:}). bayad adadi bein-e 1 ta 65535 bashad."
   echo "$pubkey" | grep -qE '^[A-Za-z0-9+/]{40,64}={0,2}$' || die "pubkey bayad base64-e motabar bashad (az 'ratholectl noise show' rooye Iran)."
+  # pattern mostaghim dar TOML (pattern = "...") miravad — naqol/ghalvat-e TOML ra rad kon.
+  [ -z "$pattern" ] || echo "$pattern" | grep -qE '^[A-Za-z0-9_.-]+$' || die "pattern-e noise namotabar (faghat [A-Za-z0-9_.-])."
 
   local env_bak="" cli_bak=""
   if [ -f "$ENV_FILE" ]; then env_bak="$(rth_mktemp)" || return 1; cp -a "$ENV_FILE" "$env_bak" || return 1; fi
@@ -1602,6 +1637,8 @@ up_noise_on(){ # $1=id $2=remote(host:port) $3=pubkey [pattern]
   [ -n "$remote" ] && [ -n "$pubkey" ] || die "estefade: ratholenode upstream noise <id> on <iran_host:port> <pubkey> [pattern]"
   echo "$remote" | grep -qE '^[A-Za-z0-9_.-]+:[0-9]+$' || die "adres bayad HOST:PORT bashad."
   echo "$pubkey" | grep -qE '^[A-Za-z0-9+/=]{40,64}$' || die "pubkey-e noise namotabar (base64)."
+  # pattern mostaghim dar TOML miravad — naqol/ghalvat-e TOML ra rad kon.
+  [ -z "$pattern" ] || echo "$pattern" | grep -qE '^[A-Za-z0-9_.-]+$' || die "pattern-e noise namotabar (faghat [A-Za-z0-9_.-])."
 
   local env_f; env_f="$(up_env "$id")"
   local toml_f; toml_f="$(up_toml "$id")"
@@ -2007,20 +2044,63 @@ cmd_restore(){
   need_root
   local f="${1:-}"
   [ -n "$f" ] && [ -f "$f" ] || die "file backup peyda nashod: $f"
+  # MOHEM: file-e restore dakhel-e tar be / bAZ MIKHORAD — file-e mozdar (masir-e motlagh,
+  # ../, symlink) mitavanad har file-i rooye system benevisad (unit-e systemd = persistence).
+  # haman ghvaye validate_tar_archive-e update.sh inja ham emal mishavad.
+  local py=""
+  if command -v python3 >/dev/null 2>&1; then py=python3; elif command -v python >/dev/null 2>&1; then py=python; fi
+  local validated=0
+  if [ -n "$py" ]; then
+    if "$py" - "$f" <<'PYEOF'
+import sys, tarfile
+try:
+    with tarfile.open(sys.argv[1], 'r:*') as tf:
+        for m in tf.getmembers():
+            name = m.name.replace('\\', '/')
+            if name.startswith('/') or '..' in name.split('/'):
+                sys.exit(1)
+            if m.isdev() or m.ischr() or m.isblk() or m.isfifo():
+                sys.exit(1)
+            if m.issym() or m.islnk():
+                t = m.linkname.replace('\\', '/')
+                if t.startswith('/') or '..' in t.split('/'):
+                    sys.exit(1)
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+    then validated=1
+    else die "file backup namotabar kharabe shode ya daraye masir/symlink-e khatarnak ast (fail-closed)."
+    fi
+  else
+    # bedoon python: tar -tzf masir-ha ra list mikond; absolute ya .. → rad.
+    if tar -tzf "$f" 2>/dev/null | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+      die "file backup daraye masir-e motlagh ya .. ast (fail-closed)."
+    fi
+    validated=1
+  fi
+  [ "$validated" -eq 1 ] || die "validate shekast khord."
   tar -xzf "$f" -C / 2>/dev/null || die "baz kardan backup shekast khord."
   log "restore shod. baztolid configha va rahandazi..."
   # restart (na hot-reload): backup mumken ast TUNNEL-e motafavet (kcp/plain/noise) dashte
   # bashad va rathole taghir-e transport ra ba hot-reload emal nemikonad — pas restart lazem ast.
+  local rc=0
   if [ -f "$SVC_FILE" ]; then
-    gen_client
-    restart_svc
+    gen_client && restart_svc || { err "gen/restart-e $SVC baad az restore shekast khord."; rc=1; }
   fi
   # upstreamha
   if [ -d "$UP_DIR" ]; then
     local e id
-    for e in "$UP_DIR"/*.env; do [ -f "$e" ] || continue; id="$(basename "$e" .env)"; up_restart "$id"; done
+    for e in "$UP_DIR"/*.env; do [ -f "$e" ] || continue; id="$(basename "$e" .env)"
+      up_restart "$id" || { err "restart-e upstream '$id' shekast khord."; rc=1; }
+    done
   fi
-  log "restore node kamel shod."
+  if [ "$rc" -eq 0 ]; then
+    log "restore node kamel shod."
+  else
+    err "restore anjam shod vali bazi restart-ha shekast khordand; journalctl -u rathole-client ra bebin."
+    return 1
+  fi
 }
 
 # namayesh naghshe-ye mohajerat hame-ye tunnelha (main + upstreamha) be kcp/FEC
@@ -2084,6 +2164,31 @@ cmd_update(){
     [ -n "$m" ] && warn "in mirror javab nadad, badi..."
   done
   [ "$ok" -eq 1 ] || { rm -f "$tmp"; die "download install.sh az hameye mirror-ha shekast khord (filtering/slug/release ra barresi kon)."; }
+  # etebarsanji-e install.sh bar asas-e SHA256SUMS-e hamin release (fail-closed agar manifest
+  # dastresi bood va match nakard). mirror-ha cache-e kohne/ghalat midahand; in hadd-e kamel-e
+  # sanji ast (emza-e PGP hanooz nist — hamsan-e install.sh).
+  local sums_tmp sums_ok=0 expected actual m2
+  sums_tmp="$(mktemp)"
+  local sums_path; if [ "$rel" = "latest" ]; then sums_path="releases/latest/download/SHA256SUMS"; else sums_path="releases/download/${rel}/SHA256SUMS"; fi
+  for m2 in "${mirrors[@]}"; do
+    if curl -fsSL --retry 2 --connect-timeout 20 "${m2}https://github.com/${gh}/${sums_path}" -o "$sums_tmp" 2>/dev/null && [ -s "$sums_tmp" ]; then sums_ok=1; break; fi
+  done
+  if [ "$sums_ok" -eq 1 ]; then
+    expected="$(grep -E "[[:space:]](\./)?install\.sh$" "$sums_tmp" 2>/dev/null | awk '{print $1}' | head -n1)"
+    if [ -n "$expected" ]; then
+      actual="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"
+      if [ "$actual" != "$expected" ]; then
+        rm -f "$tmp" "$sums_tmp"
+        die "checksum-e install.sh motabeghat nadarad! Entezar: $expected , mohasebe-shode: $actual (mirror-e kharab/mozdar?)."
+      fi
+      log "checksum-e install.sh taeed shod."
+    else
+      warn "install.sh dar SHA256SUMS peyda nashod; bedoon-e checksum edame midaham."
+    fi
+  else
+    warn "daryaft-e SHA256SUMS shekast khord; install.sh bedoon-e etebarsanji ejra mishavad."
+  fi
+  rm -f "$sums_tmp"
   log "ejra-ye update-e kamel (snapshot + health-check + rollback-e khodkar)..."
   RATHOLE_GH="$gh" RATHOLE_RELEASE="$rel" bash "$tmp" --update
   local rc=$?
@@ -2157,20 +2262,21 @@ adaptive_probe_tcp(){
 }
 
 # probe WebSocket TLS (RFC 6455 handshake)
-# $1=dial_host $2=port $3=path $4=header-haye ezafi $5=tls_hostname $6=trusted_root
+# $1=dial_host $2=port $3=path [$4=BAYAD khali bashad — az inja estefade nakonid] $5=tls_hostname $6=trusted_root
 # → healthy|ws_rejected|ws_timeout|tls_failed
-# $4 baraye backhaul lazem ast: masir-e '/channel' bedoon-e 'Authorization: Bearer <token>'
-# ba 401 rad mishavad va probe ESBHTBAHAN failover mikonad.
+# header-e ezafi (mesl Authorization-e backhaul) az motghayer-e mohiti-e RTH_PROBEHDR mikhanad
+# NA az argv: token-e backhaul dar /proc/*/cmdline be hame karbaran-e lokali mikhond (argv) —
+# /proc/*/environ faghat baraye saheb-e process (root) khandoni ast.
 adaptive_probe_ws_tls(){
-  local host="$1" port="${2:-443}" path="${3:-/}" xhdr="${4:-}"
+  local host="$1" port="${2:-443}" path="${3:-/}" xhdr="${RTH_PROBEHDR:-}"
   local tls_host="${5:-$host}" trust="${6:-}"
   if command -v python3 >/dev/null 2>&1; then
     python3 -c "
-import sys, socket, ssl, time
+import sys, os, socket, ssl, time
 host = sys.argv[1]
 port = int(sys.argv[2])
 path = sys.argv[3]
-xhdr = sys.argv[4] if len(sys.argv) > 4 else ''
+xhdr = os.environ.get('RTH_PROBEHDR', '')
 tls_host = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else host
 cafile = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else None
 
@@ -2209,7 +2315,7 @@ except Exception:
     ms = int((time.time() - t0) * 1000)
     print(f'tls_failed:{ms}')
     sys.exit(1)
-" "$host" "$port" "$path" "$xhdr" "$tls_host" "$trust"
+" "$host" "$port" "$path" "" "$tls_host" "$trust"
     return $?
   fi
 
@@ -2218,7 +2324,7 @@ except Exception:
   local t0 t1 ms out
   t0="$(date +%s%3N 2>/dev/null || echo 0)"
   out="$(printf 'GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n%s\r\n' \
-    "$path" "$tls_host" "$xhdr" | timeout 8 openssl s_client "${ssl_args[@]}" 2>/dev/null)" || true
+    "$path" "$tls_host" "${RTH_PROBEHDR:-}" | timeout 8 openssl s_client "${ssl_args[@]}" 2>/dev/null)" || true
   t1="$(date +%s%3N 2>/dev/null || echo "$t0")"; ms=$(( t1 - t0 ))
   if echo "$out" | grep -q 'HTTP/1.1 101'; then echo "healthy:${ms}"; return 0
   elif [ -n "$out" ]; then echo "ws_rejected:${ms}"; return 1
@@ -2226,12 +2332,13 @@ except Exception:
 }
 
 # probe WebSocket plain (bedoon TLS, baraye halat plain)
+# header-e ezafi az RTH_PROBEHDR (mohiti) — na argv (token dar /proc cmdline nemiayad).
 adaptive_probe_ws_plain(){
-  local host="$1" port="${2:-8880}" path="${3:-/}" xhdr="${4:-}"
+  local host="$1" port="${2:-8880}" path="${3:-/}"
   local t0 t1 ms out
   t0="$(date +%s%3N 2>/dev/null || echo 0)"
   out="$(printf 'GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n%s\r\n' \
-    "$path" "$host" "$xhdr" | timeout 5 bash -c "
+    "$path" "$host" "${RTH_PROBEHDR:-}" | timeout 5 bash -c "
       exec 3<>/dev/tcp/${host}/${port}
       cat >&3
       timeout 3 cat <&3
@@ -2279,18 +2386,29 @@ except Exception:
 
   case "$mode" in
     ws)   result="$(adaptive_probe_ws_tls "$host" "$port" "/" "" "$tls_host" "$tls_trust" 2>/dev/null)" ;;
-    plain) result="$(adaptive_probe_ws_plain "$host" "${PLAIN_REMOTE##*:}" "/" 2>/dev/null)" ;;
+    plain)
+      # MOHEM: dar halat plain, dial be PLAIN_REMOTE ast (host + port) na SERVER. ghablan
+      # host-e SERVER ba port-e PLAIN_REMOTE probe mishod → host-e ghalat → probe hamishe
+      # fail → adaptive-e slem be ws barmigasht va tunnel-e slem mishkast.
+      local pr="${PLAIN_REMOTE:-$SERVER}"
+      result="$(adaptive_probe_ws_plain "${pr%%:*}" "${pr##*:}" "/" 2>/dev/null)" ;;
     kcp)  result="$(adaptive_probe_kcp 2>/dev/null)" ;;
     # backhaul: control channel-e client rooye '/channel' hardcode ast (na '/') va nginx haman
     # masir ra be backhaul-server proxy mikonad — pas probe bayad be '/channel' beravad.
     # token HATMAN lazem ast vagarna backhaul ba 401 rad mikonad. TLS/direct az transport miayad.
+    # token az RTH_PROBEHDR (mohiti, faqat baraye farzandan) mipasrad — na argv (ps/proc).
     backhaul)
       local bhr="${BH_REMOTE_ADDR:-${BH_REMOTE:-$host}:443}"
       local bhh="${bhr%%:*}" bhp="${bhr##*:}"
+      # CRLF-e entehai ELZAMI ast: printf sartasar %s ba yek \r\n miband va HTTP niaz be
+      # \r\n\r\n dar enteha-e header-ha darad.
+      RTH_PROBEHDR="Authorization: Bearer ${BH_TOKEN:-}"$'\r\n'
+      export RTH_PROBEHDR
       case "${BH_TRANSPORT:-wssmux}" in
-        ws|wsmux) result="$(adaptive_probe_ws_plain "$bhh" "$bhp" "/channel" "Authorization: Bearer ${BH_TOKEN}"$'\r\n' 2>/dev/null)" ;;
-        *) result="$(adaptive_probe_ws_tls "$bhh" "$bhp" "/channel" "Authorization: Bearer ${BH_TOKEN}"$'\r\n' 2>/dev/null)" ;;
-      esac ;;
+        ws|wsmux) result="$(adaptive_probe_ws_plain "$bhh" "$bhp" "/channel" 2>/dev/null)" ;;
+        *) result="$(adaptive_probe_ws_tls "$bhh" "$bhp" "/channel" "" 2>/dev/null)" ;;
+      esac
+      unset RTH_PROBEHDR ;;
     *)    result="healthy:0" ;;
   esac
 
@@ -2484,14 +2602,20 @@ except Exception:
         switch="$(adaptive_should_switch "$failures" "$ADAPTIVE_FAILURES" "$recoveries" "$ADAPTIVE_RECOVERIES" "$cd_rem")"
         if [ "$switch" = "yes" ] || [ "$switch" = "recover" ]; then
           local cur="${TUNNEL:-ws}" next reason
-          if [ "$switch" = "yes" ]; then
+          if [ "$cur" = "backhaul" ]; then
+            # MOHEM: backhaul jaygozin-e kamele tunnel ast (na yek carrier-e ws/kcp).
+            # switch be ws tunnel-e dovom-e movazi misazad va backhaul-e slem ra migaland.
+            warn "adaptive: TUNNEL=backhaul faal ast; adaptive switch be ws/kcp anjam nemishavad (faghat probe/state record mishavad)."
+          elif [ "$switch" = "yes" ]; then
             case "$cur" in ws) next=kcp ;; kcp) next=ws ;; *) next=ws ;; esac
             reason="failover (failures=$failures)"
           else
             next=ws
             reason="recovery (recoveries=$recoveries)"
           fi
-          if [ "$next" = "kcp" ] && [ -z "${KCP_REMOTE:-}" ]; then
+          if [ "${cur:-ws}" = "backhaul" ]; then
+            :  # hich switchi anjam nemishavad
+          elif [ "$next" = "kcp" ] && [ -z "${KCP_REMOTE:-}" ]; then
             warn "adaptive: switch be kcp anjam nemishavad chon KCP_REMOTE tanzim nashode ast."
           elif [ "$next" != "$cur" ]; then
             warn "adaptive: switch az '$cur' be '$next' ($reason)"

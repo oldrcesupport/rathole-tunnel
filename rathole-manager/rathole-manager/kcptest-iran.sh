@@ -68,7 +68,9 @@ fi
 
 stop_all
 log "rahandazi iperf3 server rooye 127.0.0.1:5201..."
-setsid iperf3 -s -1 >/var/log/kcptest-iperf.log 2>&1 &
+# -B 127.0.0.1 ELZAMI ast: bind-e pishfrz-e iperf3 WILDCARD ast — bedoon-e in har kasi az
+# internet dar modat-e tst yek iperf-e raygan be onvan-e server-e Iran migereft.
+setsid iperf3 -s -1 -B 127.0.0.1 >/var/log/kcptest-iperf.log 2>&1 &
 echo $! > "$IPERF_PIDF"
 
 log "rahandazi kcptun server rooye UDP :${UDP_PORT} (FEC: datashard=10 parity=3 ~30%)..."
@@ -77,6 +79,26 @@ setsid "$BIN" -t "127.0.0.1:5201" -l ":${UDP_PORT}" \
   -sndwnd 2048 -rcvwnd 2048 -datashard 10 -parityshard 3 -dscp 46 -nocomp \
   >/var/log/kcptest-server.log 2>&1 &
 echo $! > "$PIDF"
+
+# liveness-check: baad az 1 sanie har do process bayad zende bashand — ghablan «amade shod»
+# hata vaghti kcptun folan crash karde bood (REMOTE/key eshtebah) chap mishod.
+sleep 1
+if ! kill -0 "$(cat "$IPERF_PIDF" 2>/dev/null)" 2>/dev/null; then
+  err "iperf3 bala niamad; /var/log/kcptest-iperf.log ra bebin."
+  exit 1
+fi
+if ! kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; then
+  err "kcptun-server bala niamad; /var/log/kcptest-server.log ra bebin."
+  exit 1
+fi
+
+if [ "$KEY" = "rh-kcp-test-key" ]; then
+  warn "KEY-e PISHFRZ-e OMOMI dar hal-e estefade ast (rh-kcp-test-key). baraye tst-e amn: KCP_KEY=<random> bash kcptest-iran.sh start ... va haman KEY ro rooye node ham bede."
+fi
+# auto-expire-e motelashof: tst-e faramosh-shode UDP relay + iperf-e baz nemigarad;
+# 1 saate bad khodkar motevaghef mishavad (systemd unit nist ke trackesh konad).
+( sleep "${KCP_TEST_TTL:-3600}"; "$0" stop >/dev/null 2>&1 ) >/dev/null 2>&1 &
+disown 2>/dev/null || true
 
 echo
 log "amade shod."

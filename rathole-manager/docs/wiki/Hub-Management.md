@@ -44,7 +44,7 @@ sudo ratholectl hub on 8088   # → https://<domain>/hub/
 
 **روش دستی:**
 ```bash
-ssh-copy-id -i /root/.ssh/id_ed25519.pub root@<server_ip>
+ssh-copy-id -i /etc/ratholehub/id_ed25519.pub root@<server_ip>
 # سپس سرور را از طریق POST /api/servers اضافه کنید
 ```
 

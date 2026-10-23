@@ -156,6 +156,9 @@ const DICT={
  en:{
   auto:'Auto refresh',refresh:'Refresh',settings:'Settings',audit:'Activity log',logout:'Logout',
   login_title:'Panel login',pw_ph:'Admin password',login_btn:'Login',pw_wrong:'Wrong password',
+  l_autofill:'Auto-fetch from Iran server',autofilling:'Fetching key/IP from Iran…',
+  autofilled:'Fields filled ✓ (remote/key/profile match Iran)',
+  autofail:'Fetch failed — make sure "kcp on" is enabled on the Iran server',
   add_server:'Add server',f_name:'Name',f_host:'Host/IP',f_user:'SSH user',f_port:'SSH port',add_btn:'+ Add',
   prov_btn:'Auto install',prov_pw:'SSH password (root)',provisioning:'Connecting & installing…',
   prov_hint:'Connects via SSH password, installs the hub key, deploys the scripts and adds the server to the hub. (requires sshpass on the hub)',

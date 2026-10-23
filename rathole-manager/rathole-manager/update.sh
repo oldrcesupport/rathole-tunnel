@@ -281,7 +281,14 @@ health_check(){ # $@ = naghsh-ha ; return 0 = salem, 1 = kharab
           systemctl is-active --quiet nginx || { err "health: nginx faal nist."; bad=1; }
         fi ;;
       node)
-        systemctl is-active --quiet rathole-client || { err "health: rathole-client faal nist."; bad=1; } ;;
+        # MOHEM: dar halat-e backhaul, 'ratholenode backhaul on' rathole-client ra KHAMOOSH
+        # mikond (backhaul-client jaygozin-e kamel-e tunnel ast). check-e rathole-client dar in
+        # halat hamishe «nagensht» mipandid → tamame update-ha be eshtebah rollback mishodand.
+        if [ -f /etc/rathole/node.env ] && grep -q '^TUNNEL=backhaul' /etc/rathole/node.env 2>/dev/null; then
+          systemctl is-active --quiet rathole-backhaul-client || { err "health: rathole-backhaul-client faal nist."; bad=1; }
+        else
+          systemctl is-active --quiet rathole-client || { err "health: rathole-client faal nist."; bad=1; }
+        fi ;;
       hub)
         systemctl is-active --quiet ratholehub || { err "health: ratholehub faal nist."; bad=1; } ;;
     esac
@@ -431,9 +438,15 @@ restart_services(){
         fi
         ;;
       node)
-        systemctl restart rathole-client 2>/dev/null || bad=1
-        if systemctl list-unit-files 2>/dev/null | grep -q '^rathole-backhaul-client\.service'; then
+        # halat-e backhaul: rathole-client bayad KHAMOOSH bmand (backhaul jaygozin-e an ast);
+        # start-e an do tunnel-e movazi misazad.
+        if [ -f /etc/rathole/node.env ] && grep -q '^TUNNEL=backhaul' /etc/rathole/node.env 2>/dev/null; then
           systemctl restart rathole-backhaul-client 2>/dev/null || bad=1
+        else
+          systemctl restart rathole-client 2>/dev/null || bad=1
+          if systemctl list-unit-files 2>/dev/null | grep -q '^rathole-backhaul-client\.service'; then
+            systemctl restart rathole-backhaul-client 2>/dev/null || bad=1
+          fi
         fi
         ;;
       hub)

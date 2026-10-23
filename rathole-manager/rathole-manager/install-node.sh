@@ -22,16 +22,16 @@ die(){ err "$*"; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --server)            SERVER="$2"; shift 2;;
-    --tls-hostname)      TLS_HOSTNAME="$2"; shift 2;;
-    --tls-trusted-root)  TLS_TRUSTED_ROOT="$2"; shift 2;;
-    --name)              NAME="$2"; shift 2;;
-    --token)             TOKEN="$2"; shift 2;;
-    --inbound-port)      INBOUND="$2"; shift 2;;
-    --api-token)         API_TOKEN="$2"; shift 2;;
-    --api-inbound-port)  API_INBOUND="$2"; shift 2;;
-    --restore)           RESTORE="$2"; shift 2;;
-    --version)           RATHOLE_VERSION="$2"; shift 2;;
+    --server)            [ $# -ge 2 ] || die "--server be yek meghdar niaz darad."; SERVER="$2"; shift 2;;
+    --tls-hostname)      [ $# -ge 2 ] || die "--tls-hostname be yek meghdar niaz darad."; TLS_HOSTNAME="$2"; shift 2;;
+    --tls-trusted-root)  [ $# -ge 2 ] || die "--tls-trusted-root be yek meghdar niaz darad."; TLS_TRUSTED_ROOT="$2"; shift 2;;
+    --name)              [ $# -ge 2 ] || die "--name be yek meghdar niaz darad."; NAME="$2"; shift 2;;
+    --token)             [ $# -ge 2 ] || die "--token be yek meghdar niaz darad."; TOKEN="$2"; shift 2;;
+    --inbound-port)      [ $# -ge 2 ] || die "--inbound-port be yek meghdar niaz darad."; INBOUND="$2"; shift 2;;
+    --api-token)         [ $# -ge 2 ] || die "--api-token be yek meghdar niaz darad."; API_TOKEN="$2"; shift 2;;
+    --api-inbound-port)  [ $# -ge 2 ] || die "--api-inbound-port be yek meghdar niaz darad."; API_INBOUND="$2"; shift 2;;
+    --restore)           [ $# -ge 2 ] || die "--restore be yek masir niaz darad."; RESTORE="$2"; shift 2;;
+    --version)           [ $# -ge 2 ] || die "--version be yek meghdar niaz darad."; RATHOLE_VERSION="$2"; shift 2;;
     *) die "argument nashenakhte: $1";;
   esac
 done
@@ -41,7 +41,7 @@ done
 CONFIG_NOW=0
 if [ -n "$RESTORE" ]; then
   [ -f "$RESTORE" ] || die "file backup peyda nashod: $RESTORE"
-elif [ -n "$SERVER" ] || [ -n "$NAME" ] || [ -n "$TOKEN" ] || [ -n "$INBOUND" ]; then
+elif [ -n "$SERVER" ] || [ -n "$NAME" ] || [ -n "$TOKEN" ] || [ -n "$INBOUND" ] || [ -n "$TLS_HOSTNAME" ] || [ -n "$TLS_TRUSTED_ROOT" ]; then
   [ -n "$SERVER" ] && [ -n "$NAME" ] && [ -n "$TOKEN" ] && [ -n "$INBOUND" ] || \
     die "argumenthaye lazem: --server --name --token --inbound-port  (ya --restore <file>)"
   if [[ "$SERVER" =~ ^[A-Za-z0-9_.-]+:([0-9]+)$ ]]; then
@@ -56,9 +56,17 @@ elif [ -n "$SERVER" ] || [ -n "$NAME" ] || [ -n "$TOKEN" ] || [ -n "$INBOUND" ];
   if [ -n "$API_INBOUND" ]; then
     [[ "$API_INBOUND" =~ ^[0-9]+$ ]] && [ "$API_INBOUND" -ge 1 ] && [ "$API_INBOUND" -le 65535 ] || die "api inbound port bayad beine 1 ta 65535 bashad: $API_INBOUND"
   fi
+  { [ -n "$API_TOKEN" ] || [ -n "$API_INBOUND" ]; } && { [ -z "$API_TOKEN" ] || [ -z "$API_INBOUND" ]; } && \
+    warn "--api-token va --api-inbound-port bayad BA HAM dade shavand; API service rad mishavad."
   [ -z "$TLS_HOSTNAME" ] || echo "$TLS_HOSTNAME" | grep -qE '^[A-Za-z0-9_.-]+$' || die "TLS hostname namotabar."
   [ -z "$TLS_TRUSTED_ROOT" ] || echo "$TLS_TRUSTED_ROOT" | grep -qE '^/[A-Za-z0-9_./-]{1,255}$' || die "TLS trusted root namotabar."
   [ -z "$TLS_TRUSTED_ROOT" ] || [ -n "$TLS_HOSTNAME" ] || die "--tls-trusted-root be --tls-hostname niaz darad."
+  [ -z "$TLS_TRUSTED_ROOT" ] || [ -f "$TLS_TRUSTED_ROOT" ] || die "TLS trusted root peyda nashod: $TLS_TRUSTED_ROOT"
+  # NAME/TOKEN mostaghim dar services.conf (name|token|port) va TOML (token = "...",
+  # [client.services.NAME]) mishinand — haman ghayeed-e 'ratholenode add-svc' (fail-closed).
+  echo "$NAME" | grep -qE '^[a-zA-Z0-9_-]+$' || die "NAME namotabar (faghat harf/adad/_/-): '$NAME'"
+  echo "$TOKEN" | grep -qE '^[A-Za-z0-9._=+/-]+$' || die "TOKEN namotabar (faghat [A-Za-z0-9._=+/-]; '|' / newline / naqol mojaz nist)."
+  [ -z "$API_TOKEN" ] || echo "$API_TOKEN" | grep -qE '^[A-Za-z0-9._=+/-]+$' || die "API TOKEN namotabar (hman ghayeed-e TOKEN)."
   CONFIG_NOW=1
 fi
 
@@ -106,8 +114,18 @@ fi
 mkdir -p /etc/rathole /usr/local/share/rathole
 
 # ---------- nasb ratholenode ----------
-[ -f "$SCRIPT_DIR/ratholenode" ] && { install -m 755 "$SCRIPT_DIR/ratholenode" /usr/local/bin/ratholenode; log "ratholenode nasb shod."; } || warn "ratholenode knar askript nist."
-[ -f "$SCRIPT_DIR/common.sh" ] && { install -m 644 "$SCRIPT_DIR/common.sh" /usr/local/share/rathole/common.sh; rm -f /usr/local/bin/common.sh; log "common.sh nasb shod."; }
+# ghablan `A && { B; C; } || D` bood: shekast-e install (B) bi-seda rad mishod va «nasb shod»
+# chap mishod; ba CLI-e kohde alakar adamh midad (nasb-e nimesh).
+if [ -f "$SCRIPT_DIR/ratholenode" ]; then
+  install -m 755 "$SCRIPT_DIR/ratholenode" /usr/local/bin/ratholenode || die "nasb-e ratholenode shekast khord."
+  log "ratholenode nasb shod."
+else
+  die "ratholenode knar askript peyda nashod (baste naghes ast)."
+fi
+if [ -f "$SCRIPT_DIR/common.sh" ]; then
+  install -m 644 "$SCRIPT_DIR/common.sh" /usr/local/share/rathole/common.sh && rm -f /usr/local/bin/common.sh && log "common.sh nasb shod." \
+    || die "nasb-e common.sh shekast khord (ratholenode bedoon-e an bala nemiayad)."
+fi
 # core-e backhaul-e patch-shode (uTLS)
 if [ -f "$SCRIPT_DIR/core-backhaul/SHA256SUMS" ]; then
   cp -rf "$SCRIPT_DIR/core-backhaul" /usr/local/share/rathole/
@@ -159,6 +177,19 @@ fi
 
 # ---------- nasb tazh ba argument ----------
 if [ "$CONFIG_NOW" -eq 1 ]; then
+  # idempotency + hefz-e karbar: ejra-ye dobar-e installer rooye node-e faal (mesl node-e
+  # TUNNEL=kcp/backhaul ya ba service-haye add-svc-shode) node.env/services.conf ra JAYGOZIN
+  # mikond va tunnel/config-e mojood pak mishavad. backup-e zaman-dar mishavad ta bargasht
+  # dasti momken bashad.
+  if [ -f /etc/rathole/node.env ] || [ -f /etc/rathole/services.conf ]; then
+    bdir="/var/backups/rathole-manager/pre-reconfig-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$bdir" && chmod 700 "$bdir" || true
+    [ -f /etc/rathole/node.env ] && cp -a /etc/rathole/node.env "$bdir/" 2>/dev/null || true
+    [ -f /etc/rathole/services.conf ] && cp -a /etc/rathole/services.conf "$bdir/" 2>/dev/null || true
+    [ -f /etc/rathole/client.toml ] && cp -a /etc/rathole/client.toml "$bdir/" 2>/dev/null || true
+    warn "tanzimat-e ghabli be $bdir backup shod (node.env/services.conf jaygozin mishavand)."
+    warn "agar node dar halat-e kcp/plain/noise/backhaul ast ya service-ezafe dasht, in nasb be ws barmigardad."
+  fi
   log "neveshtan /etc/rathole/node.env va services.conf..."
   {
     echo "SERVER=${SERVER}"

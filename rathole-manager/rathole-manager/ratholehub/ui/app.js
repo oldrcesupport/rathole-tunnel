@@ -10,13 +10,21 @@ function applyStatic(){
 function toggleLang(){LANG=(LANG==='fa'?'en':'fa');localStorage.setItem('rh_lang',LANG);applyStatic();shell();}
 function confirmT(k,extra){return confirm(t(k)+(extra?(' '+extra):'')+' ?');}
 
-function h(t){return (''+(t==null?'':t)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function h(t){return (''+(t==null?'':t)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),5000);}
 async function api(m,p,b){const o={method:m,headers:{'Content-Type':'application/json'}};
  if(TOKEN)o.headers['Authorization']='Bearer '+TOKEN; if(b)o.body=JSON.stringify(b);
- const r=await fetch(p,o); let j={};try{j=await r.json()}catch(e){}
- if(r.status===401){TOKEN='';localStorage.removeItem('rh_token');shell();} return {status:r.status,j};}
-function logout(){TOKEN='';localStorage.removeItem('rh_token');shell();}
+ // reject-e fetch (hub restart / 502 / sleep) ghablan unhandled rejection mishod va safha
+ // ta abad rooye «در حال دریافت» mimandand. hala status=0 + payam-e elmegi bargmigarad.
+ let r;
+ try{ r=await fetch(p,o); }
+ catch(e){ return {status:0,j:{error:'network error: '+((e&&e.message)||e)}}; }
+ let j={};try{j=await r.json()}catch(e){}
+ if(r.status===401){resetSessionState();shell();} return {status:r.status,j};}
+// hazf-e kamel-e vaziat-e session: logout/401 — ghablan SERVERS/OVS/HUBST mimandand va
+// login-e badi inventory-e kohne (server-haye hazf-shode) ra neshan midad.
+function resetSessionState(){TOKEN='';localStorage.removeItem('rh_token');SERVERS=[];OVS={};HUBST=null;}
+function logout(){resetSessionState();shell();}
 function modal(html){let m=$('modal');if(!m){m=document.createElement('div');m.id='modal';m.className='modal';m.onclick=e=>{if(e.target===m)closeModal();};document.body.appendChild(m);}m.innerHTML='<div class="mbox">'+html+'</div>';m.style.display='flex';}
 function closeModal(){const m=$('modal');if(m)m.style.display='none';}
 
@@ -64,7 +72,10 @@ async function router(){
  else if(ROUTE.page==='settings')renderSettingsPage();
  else renderDashboard();
 }
-async function ensureServers(){if(SERVERS.length)return;const {j}=await api('GET','api/servers');SERVERS=j||[];}
+async function ensureServers(){if(SERVERS.length)return;const {status,j}=await api('GET','api/servers');
+ // javab-e gheyr-200 / gheyr-array ghablan dar SERVERS zakhire mishod va renderServerPage
+ // rooye .filter() mishkast. hala fail → list-e khali (render crash nemikonad).
+ SERVERS=(status===200&&Array.isArray(j))?j:[];}
 // sazegari ba code-haye ghadimi: refresh-e inventory + safhe-ye faal
 async function loadAll(){SERVERS=[];await ensureServers();router();}
 // vaghti overview miresad, faghat safhe-ye faal ra be-rooz kon
@@ -77,7 +88,12 @@ function onOv(n){
  else if(ROUTE.page==='server'&&fnd(n).role==='iran'&&fnd(ROUTE.param).role==='node')renderServerPage(ROUTE.param);
  else if(ROUTE.page==='routing')scheduleGraph();
 }
-async function loadOv(n){const {j}=await api('GET','api/servers/'+n+'/overview');OVS[n]=j||{};onOv(n);}
+async function loadOv(n){const {status,j}=await api('GET','api/servers/'+n+'/overview');
+ // MOHEM: khata-e HTTP (404/502) ghablan hamande overview-e SALEM cache mishod va dot-e
+ // sabz-e «up» neshan dade mishod. hala fail → reachable:false (dot-e ghermez, halat-e vagheii).
+ OVS[n]=(status===200&&j&&typeof j==='object'&&!j.error)?j
+        :{reachable:false,error:(j&&j.error)||('HTTP '+status)};
+ onOv(n);}
 
 function shell(){
  applyStatic();
@@ -112,8 +128,16 @@ function pollByPage(){
  else if(ROUTE.page==='dashboard'||ROUTE.page==='routing'){SERVERS.forEach(s=>loadOv(s.name));}
  if(ROUTE.page==='dashboard')loadHubStatus();
 }
-async function doLogin(){const {status,j}=await api('POST','api/login',{password:$('pw').value});
- if(status===200){TOKEN=j.token;localStorage.setItem('rh_token',TOKEN);if(!location.hash)location.hash='#/dashboard';shell();}else{$('msg').textContent=t('pw_wrong');}}
+let LOGIN_BUSY=false;
+async function doLogin(){
+ if(LOGIN_BUSY)return;          // dobare-submit (Enter + click) talash-haye limiter-ra be-hoodar mirizad
+ LOGIN_BUSY=true;
+ try{
+  const {status,j}=await api('POST','api/login',{password:$('pw').value});
+  if(status===200){TOKEN=j.token;localStorage.setItem('rh_token',TOKEN);if(!location.hash)location.hash='#/dashboard';shell();}
+  else{$('msg').textContent=(j&&j.error)?j.error:t('pw_wrong');}
+ }finally{LOGIN_BUSY=false;}
+}
 function fnd(n){return SERVERS.find(s=>s.name===n)||{};}
 function setDot(n,cls){const d=$('dot_'+n); if(d)d.className='dot '+cls;}
 
@@ -836,12 +860,17 @@ async function renderSettingsPage(){
 
 function outModal(title,text){var id='om_'+Math.random().toString(36).slice(2);modal('<h3>'+h(title)+'</h3><pre id="'+id+'" style="max-height:52vh;overflow:auto;white-space:pre-wrap;user-select:text;-webkit-user-select:text">'+h(text)+'</pre><div class="row" style="margin-top:10px"><button class="g" onclick="copyText(\''+id+'\')">'+t('copy_out')+'</button> <button class="gh" onclick="closeModal()">'+t('close')+'</button></div>');}
 async function run(n,a,args){toast(t('running')+' '+a+' '+t('on')+' '+n+' …');
- const {j}=await api('POST','api/servers/'+n+'/action',{action:a,args:args||{}});
+ const {status,j}=await api('POST','api/servers/'+n+'/action',{action:a,args:args||{}});
  const rc=(j&&typeof j.rc==='number')?j.rc:null;
  const ok=(rc===0), bad=(rc!==null&&rc!==0);
  const verdict=ok?('✓ '+t('ok_rc')):(bad?('✗ '+t('fail_rc')+' (rc='+rc+')'):'');
  const body=((j.cmd?('$ '+j.cmd+'\n'):'')+((j.out||'')+(j.err?('\n'+j.err):''))).trim();
  const full=((verdict?verdict+(body?'\n\n':''):'')+body)||JSON.stringify(j);
+ if(status!==200){
+  // khata-ye HTTP (400/404/...) ghablan toast-e KHALI midad — operator fekr mikard click morda.
+  outModal(a+' ✗','HTTP '+status+((j&&j.error)?(' — '+j.error):'')+'\n\n'+full);
+  await loadOv(n);return;
+ }
  if(bad){outModal(a+' ✗',full);}                                    // shekast: hamishe modal, ta gom nashavad
  else if(body&&(body.length>140||body.indexOf(String.fromCharCode(10))>=0)){outModal(a+' ✓',full);}
  else{toast(verdict+(body?(' — '+body):''));}

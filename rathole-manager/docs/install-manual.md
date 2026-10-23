@@ -453,7 +453,7 @@ The installer does:
 - copies `ratholectl`/`ratholenode`/`update.sh`/… into `/opt/ratholehub/bundle/` (for remote deploy)
 - generates `/etc/ratholehub/config.json` (containing `api_token`, admin password hash, SSH key path) and an empty `inventory.json`
 - a `ratholehub.service` unit on `127.0.0.1:8088` (`HUB_PORT` env overrides)
-- creates the hub SSH key: `/root/.ssh/id_ed25519`
+- creates the hub SSH key: `/etc/ratholehub/id_ed25519`
 
 > `config.json` contains the token and password hash; it is `chmod 600` and **must never** be committed or leaked.
 
@@ -463,9 +463,9 @@ The hub connects only with the SSH key (no password). Put the hub's public key o
 
 ```bash
 # on the hub server:
-ssh-copy-id -i /root/.ssh/id_ed25519.pub -p 22 root@<server_ip>
+ssh-copy-id -i /etc/ratholehub/id_ed25519.pub -p 22 root@<server_ip>
 # test:
-ssh -i /root/.ssh/id_ed25519 root@<server_ip> 'ratholenode show || ratholectl ls'
+ssh -i /etc/ratholehub/id_ed25519 root@<server_ip> 'ratholenode show || ratholectl ls'
 ```
 
 ### 5.3 Access the panel

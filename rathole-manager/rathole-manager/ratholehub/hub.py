@@ -33,19 +33,27 @@ _LOGIN_MAX = 5            # hdaksr tlashe namvfgh
 _LOGIN_WINDOW = 300       # pnjrhi sanihai
 _login_lock = threading.Lock()
 
-def login_allowed(ip):
-    now = time.time()
-    with _login_lock:
-        fails = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < _LOGIN_WINDOW]
-        _LOGIN_FAILS[ip] = fails
-        return len(fails) < _LOGIN_MAX
+# MOHEM (TOCTOU): check va record BAYAD dar yek ghoool anjam shavand. ghablan login_allowed va
+# login_record_fail jodagane ghoool migereftand; N darkhast-e hamzaman hamashon ghabl az har
+# ghoon-i fail-record mishod va hamegoon az 429 gozar mikardand (bypass-e limiter ba concurrency).
+# hala har talash ATOMIC yek slot masraf mikond; login-e movafagh slot-ha ra pak mikond.
+_LOGIN_FAILS_MAX_IPS = 10000  # sdp-e hfezhe: IP-haye ghdimi ba hengam-e edas-e had mojood ra pak kon
 
-def login_record_fail(ip):
+def login_consume_attempt(ip):
+    """Atomic check+consume: True agar mojaz be talash ast (yek slot masraf shod)."""
     now = time.time()
     with _login_lock:
         fails = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < _LOGIN_WINDOW]
+        if len(fails) >= _LOGIN_MAX:
+            _LOGIN_FAILS[ip] = fails
+            return False
         fails.append(now)
         _LOGIN_FAILS[ip] = fails
+        if len(_LOGIN_FAILS) > _LOGIN_FAILS_MAX_IPS:
+            for k in [k for k, v in _LOGIN_FAILS.items()
+                      if not v or now - v[-1] >= _LOGIN_WINDOW]:
+                _LOGIN_FAILS.pop(k, None)
+        return True
 
 def login_reset(ip):
     with _login_lock:
@@ -280,7 +288,10 @@ def get_config():
         }
         return cfg
     cfg = load_json(CONF_PATH, {})
-    cfg["_insecure"] = (cfg.get("api_token") == _INSECURE_TOKEN
+    # token-e khali ham «namn» ast: install-hub.sh ghablan die mikond vali config-e dasti/
+    # kharab-e mojood nabayad bi-seda bearer-e khali ra mojaz bodand.
+    cfg["_insecure"] = (not cfg.get("api_token")
+                        or cfg.get("api_token") == _INSECURE_TOKEN
                         or cfg.get("admin_password_sha256") == _INSECURE_PW_SHA)
     return cfg
 
@@ -358,7 +369,10 @@ def read_audit(limit=100):
         return out
     except FileNotFoundError:
         return []
-    except Exception:
+    except Exception as e:
+        # kharabi-e audit-log nabayad hamande «bi-activity» namayesh dade shavad bedoon-e
+        # etela-at; dar journal neshan-e mndhar mirim (khod-e API list-e khali barmigardand).
+        sys.stderr.write(f"[hub audit warning] Audit read failed: {type(e).__name__}\n")
         return []
 
 # ---------- vaziat-e khod-e server-e hub (uptime/load/mem/disk/serviceha) ----------
@@ -440,6 +454,7 @@ def hub_status():
 from hubcmds import (  # noqa: F401  (nam-ha dar sartasar-e hub estefade mishavand)
     RE_NAME, RE_HOST, RE_PORT, RE_PROFILE, RE_IPPORT, RE_KEY, RE_B64, RE_ID, RE_PW,
     RE_EMAIL, RE_PATH, RE_SLUG, RE_HEADER, RE_BH_SRV, RE_BH_CLI, RE_BH_TOK, RE_CHAN,
+    is_valid_port,
     build_iran_cmd, build_node_cmd, build_cmd, WRITE_ACTIONS, _diag,
 )
 
@@ -554,6 +569,15 @@ def ensure_hub_key():
     norm_kp = os.path.normpath(kp)
     if not norm_kp.startswith("/etc/ratholehub/"):
         norm_kp = "/etc/ratholehub/id_ed25519"
+        # ghbln in taghir BI-SEDA bood: config-e nasb-shode ba /root/.ssh/id_ed25519
+        # mojood bood va ba avvalin provision hame-ye eteslat-e SSH be kilid-e jadid-e
+        # injja miraftid va server-haye ghabli «Permission denied» midadand bedoon-e
+        # hich tozih. hala hoshdar-e mndhar mirim.
+        sys.stderr.write(
+            f"[hub] ssh_key_path-e config ('{kp}') mojaz nist (faghat /etc/ratholehub/); "
+            f"be '{norm_kp}' taghir dadam. age server-haye ghabli ba kilid-e ghadimi "
+            "setup shode boodand, pub-key-e jadid ra rooye anha nasb kon ya masir-e config "
+            "ra be kilid-e ghabli bargardon (faghat zir /etc/ratholehub/).\n")
     kp = norm_kp
     pub = kp + ".pub"
 
@@ -604,7 +628,7 @@ def provision_server(d):
     host = str(d.get("host", "")); user = str(d.get("ssh_user", "root"))
     port = str(d.get("ssh_port", "22")); pw = str(d.get("ssh_password", ""))
     if not RE_NAME.match(name) or role not in ("iran", "node") or not RE_HOST.match(host) \
-       or not RE_NAME.match(user) or not RE_PORT.match(port):
+       or not RE_NAME.match(user) or not is_valid_port(port):
         return {"rc": 1, "out": "", "err": "field-haye namotabar (name/role/host/user/port)"}
     if not pw:
         return {"rc": 1, "out": "", "err": "ramz SSH lazem ast"}
@@ -1045,32 +1069,51 @@ def parse_upstream_ls(text):
     return {"main": main, "upstreams": ups}
 
 # ---------- token/nshst ----------
+def _session_key(cfg):
+    # kilid-e HMAC = api_token + hash-e ramz-e admin. CHERA: faghat api_token nist — ba taghir-e
+    # ramz (mesl senario-e «ramz mafqud ast») tamame nshst-haye ghabli BAYAD batel shavand;
+    # faghat api_token in ra mimanad va nshst-haye dozdide-shode ta 24h zende mimanand.
+    return (str(cfg.get("api_token", "")) + "|" +
+            str(cfg.get("admin_password_hash") or cfg.get("admin_password_sha256", ""))).encode("utf-8")
+
 def make_session_token(cfg):
-    # kvki nshst = hmac( api_token , expiry )
+    # kvki nshst = hmac( api_token|password_hash , expiry )
     exp = str(int(time.time()) + 86400)
-    sig = hmac.new(cfg["api_token"].encode(), exp.encode(), hashlib.sha256).hexdigest()
+    sig = hmac.new(_session_key(cfg), exp.encode(), hashlib.sha256).hexdigest()
     return "%s.%s" % (exp, sig)
 
 def check_session(cfg, token):
     try:
         exp, sig = token.split(".", 1)
         if int(exp) < time.time(): return False
-        good = hmac.new(cfg["api_token"].encode(), exp.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(good, sig)
+        good = hmac.new(_session_key(cfg), exp.encode(), hashlib.sha256).hexdigest()
+        # encode-e DO taraf: compare_digest rooye str-e gheyr-ASCII TypeError midahad va
+        # thread-e darkhast bedoone pasokh mimirad (header/cookie-e maghzab = DoS-e arzan).
+        return hmac.compare_digest(good.encode("utf-8"), sig.encode("utf-8", "replace"))
     except Exception:
         return False
 
 def authed(cfg, headers, cookies):
     # Bearer token (baraye API kharji) ya kvki nshst (baraye UI)
+    token = str(cfg.get("api_token") or "")
+    if not token:
+        # token-e khali (nasb-e kharab) HARGEZ mojaz nist: compare_digest("","")=True mishod va
+        # `Authorization: Bearer ` (bedoon maghadir) dastresi-e kamel-e gheyr-mojaz midad.
+        return False
     auth = headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return hmac.compare_digest(auth[7:].strip(), cfg["api_token"])
+        return hmac.compare_digest(auth[7:].strip().encode("utf-8", "replace"),
+                                   token.encode("utf-8"))
     tok = cookies.get("rhsession", "")
     return check_session(cfg, tok)
 
 # ---------- HTTP handler ----------
 class Handler(BaseHTTPRequestHandler):
     server_version = "ratholehub/0.1"
+    # backstop-e socket: bedoon in, client-i ke Content-Length bozorg elam mikond va kond
+    # byte misozad, thread-e darkhast ra TA ABAD masrof negah midarad (ThreadingHTTPServer
+    # hadi baraye har etsl thread misazad = resource exhaustion-e arzan).
+    timeout = 60
 
     def _cookies(self):
         raw = self.headers.get("Cookie", "")
@@ -1089,6 +1132,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if "json" in ctype or "html" in ctype else ""))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        # clickjacking: panel-e auth-shode nabayad dar iframe ghabel-e jadsazi bashad.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         for k, v in (extra_headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1186,7 +1232,7 @@ class Handler(BaseHTTPRequestHandler):
         p = path.replace("/hub", "", 1) if path.startswith("/hub/api") else path
         if p == "/api/login":
             ip = self._client_ip()
-            if not login_allowed(ip):
+            if not login_consume_attempt(ip):
                 return self._send(429, {"error": "too many attempts; try later"})
             data = self._body_json()
             if data is None or not isinstance(data, dict):
@@ -1203,6 +1249,10 @@ class Handler(BaseHTTPRequestHandler):
                         c.pop("admin_password_sha256", None)
                         return c
                     update_config(_upgrade_pw)
+                    # nshst ba kilid-e (api_token|password_hash) sakhte mishavad; cfg-e dar-hafez
+                    # hanooz hash-e ghadimi darad → bayad taze bekhanim vagarna nshst-e jadid
+                    # dar avvalin check batel mishavad.
+                    cfg = get_config()
                 tok = make_session_token(cfg)
                 is_https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
                 cookie_flags = "HttpOnly; SameSite=Strict; Path=/"
@@ -1210,7 +1260,8 @@ class Handler(BaseHTTPRequestHandler):
                     cookie_flags += "; Secure"
                 return self._send(200, {"ok": True, "token": cfg["api_token"]},
                                   extra_headers={"Set-Cookie": f"rhsession={tok}; {cookie_flags}"})
-            login_record_fail(ip)
+            # slot-e in talash ghabl az verify ATOMIC masraf shod (login_consume_attempt);
+            # dar inja digar record-e jodagane niaz nist — nemishod ba concurrency bypass mishod.
             return self._send(401, {"error": "bad password"})
 
         if not authed(cfg, self.headers, self._cookies()):
@@ -1257,7 +1308,12 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/servers/([A-Za-z0-9_-]+)$", p)
         if m:
             name = m.group(1)
+            existed = any(s.get("name") == name for s in get_inventory())
+            if not existed:
+                return self._send(404, {"error": "server not found"})
             update_inventory(lambda inv: [s for s in inv if s.get("name") != name])
+            # audit: hazf-e server bayad dar tarikhche-e amaliat bmand (shvhd-e pak kardan-e asar).
+            audit_log(self._user(), name, "server_delete", "-", 0)
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
 
@@ -1292,7 +1348,7 @@ class Handler(BaseHTTPRequestHandler):
         host = str(d.get("host", "")); user = str(d.get("ssh_user", "root"))
         port = str(d.get("ssh_port", "22"))
         if not RE_NAME.match(name) or role not in ("iran", "node") or not RE_HOST.match(host) \
-           or not RE_NAME.match(user) or not RE_PORT.match(port):
+           or not RE_NAME.match(user) or not is_valid_port(port):
             return self._send(400, {"error": "invalid fields"})
         # check-and-append atomic zir-e yek ghofl ta do add-e hamzaman ham-digar ra pak nakonand.
         with _lock:
@@ -1302,6 +1358,9 @@ class Handler(BaseHTTPRequestHandler):
             inv.append({"name": name, "role": role, "host": host,
                         "ssh_user": user, "ssh_port": int(port)})
             set_inventory(inv)
+        # audit: afzoodan/vriz-e server az inventory nzr-e movaje-e amliat-e hasas ast.
+        audit_log(self._user(), name, "server_add",
+                  "role=%s host=%s port=%s" % (role, host, port), 0)
         return self._send(200, {"ok": True})
 
     def _provision(self, d):
@@ -1388,7 +1447,7 @@ class Handler(BaseHTTPRequestHandler):
             if not RE_NAME.match(str(d["ssh_user"])): return self._send(400, {"error": "bad user"})
             changes["ssh_user"] = str(d["ssh_user"])
         if "ssh_port" in d:
-            if not RE_PORT.match(str(d["ssh_port"])): return self._send(400, {"error": "bad port"})
+            if not is_valid_port(str(d["ssh_port"])): return self._send(400, {"error": "bad port"})
             changes["ssh_port"] = int(d["ssh_port"])
         if "role" in d:
             if d["role"] not in ("iran", "node"): return self._send(400, {"error": "bad role"})

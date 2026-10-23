@@ -7,7 +7,7 @@ umask 077
 
 # noskhe-ye rathole-manager (panel/node/hub). moqe-e release in adad ba tag hamahang mishavad.
 # package.sh/CI mitavanad in ra be tag-e vaghei stamp konad; agar dast taghir dadi، bedoon 'v' bezar.
-MANAGER_VERSION="1.8.7"
+MANAGER_VERSION="1.8.8"
 
 c_g(){ printf '\033[1;32m%s\033[0m' "$*"; }
 c_r(){ printf '\033[1;31m%s\033[0m' "$*"; }
@@ -477,9 +477,9 @@ UNIT
 # darvaze-ye khorooj ast — har file-e jadidi ke ezafe mikoni HATMAN az an rad kon.
 rth_redact(){
   sed -E \
-    -e 's/("(token|api_token|bh_token|backhaul_token|admin_password_sha256|password|secret|private_key|local_private_key|remote_public_key|noise_private_key)"[[:space:]]*:[[:space:]]*")[^"]*"/\1***REDACTED***"/g' \
-    -e 's/^([[:space:]]*(token|default_token|password|secret|private_key|local_private_key|remote_public_key)[[:space:]]*=[[:space:]]*")[^"]*"/\1***REDACTED***"/' \
-    -e 's/^([[:space:]]*(TOKEN|BH_TOKEN|NOISE_KEY|PASSWORD|API_TOKEN)=).*/\1***REDACTED***/' \
+    -e 's/("(token|api_token|bh_token|backhaul_token|admin_password_sha256|admin_password_hash|password|secret|private_key|privkey|noise_privkey|noise_private_key|local_private_key|remote_public_key|noise_public_key|key|trusted_root)"[[:space:]]*:[[:space:]]*")[^"]*"/\1***REDACTED***"/g' \
+    -e 's/^([[:space:]]*(token|default_token|password|secret|private_key|privkey|noise_privkey|local_private_key|remote_public_key|key)[[:space:]]*=[[:space:]]*")[^"]*"/\1***REDACTED***"/' \
+    -e 's/^([[:space:]]*(TOKEN|BH_TOKEN|NOISE_KEY|NOISE_PRIVKEY|KCP_KEY|PASSWORD|API_TOKEN)=).*/\1***REDACTED***/' \
     -e 's#(/_rh/)[A-Fa-f0-9]{8,}#\1***REDACTED***#g' \
     -e 's/([?&](token|password|secret)=)[^&"[:space:]]*/\1***REDACTED***/g'
 }

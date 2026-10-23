@@ -63,6 +63,14 @@ setsid "$BIN" -r "${REMOTE}" -l "127.0.0.1:5201" \
   >/var/log/kcptest-client.log 2>&1 &
 echo $! > "$PIDF"
 sleep 2
+# liveness-check: crash-e folan-e kcptun (REMOTE/KEY eshtebah) ghablan bi-seda rad mishod.
+if ! kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; then
+  err "kcptun-client bala niamad; /var/log/kcptest-client.log ra bebin."
+  exit 1
+fi
+if [ "$KEY" = "rh-kcp-test-key" ]; then
+  warn "KEY-e PISHFRZ-e OMOMI dar hal-e estefade ast. rooye Iran ham BAYAD haman KCP_KEY bashe (KCP_KEY=<random> bash kcptest-iran.sh start ...)."
+fi
 
 echo
 log "hala tst kon va mghaish kon:"
