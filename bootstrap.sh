@@ -73,13 +73,18 @@ while [ $# -gt 0 ]; do
     --no-run)  RUN=0; shift;;
 
     --sha256)  EXPECTED_SHA256="$2"; shift 2;;
+    --sha256=*) EXPECTED_SHA256="${1#*=}"; shift;;
+    --sha256sums-file) SHA256SUMS_FILE="$2"; shift 2;;
+    --sha256sums-file=*) SHA256SUMS_FILE="${1#*=}"; shift;;
     --yes|-y)  ASSUME_YES=1; shift;;
     --)        shift; PASS_ARGS+=("$@"); break;;
     *)         PASS_ARGS+=("$1"); shift;;
   esac
 done
 
-[ "$(id -u)" -eq 0 ] || die "bayad ba root ejra shavad (sudo)."
+if [ "${BOOTSTRAP_LIB_ONLY:-0}" != 1 ]; then
+  [ "$(id -u)" -eq 0 ] || die "bayad ba root ejra shavad (sudo)."
+fi
 
 # ---------- nasb pishniazhai paih ----------
 install_prereqs(){
@@ -611,6 +616,14 @@ main(){
     download "$BUNDLE_URL" "$bundle" || die "download shekast khord (link/shbkh/filtr ra barresi kon)."
   fi
   [ -s "$bundle" ] || die "baste khali ast (0 byte)."
+  local sums_file="${SHA256SUMS_FILE:-}"
+  if [ -z "$sums_file" ] && [ -n "$SRC_FILE" ] && [ -f "$(dirname "$SRC_FILE")/SHA256SUMS" ]; then
+    sums_file="$(dirname "$SRC_FILE")/SHA256SUMS"
+  fi
+  if [ -z "${EXPECTED_SHA256:-}" ] && [ -n "$sums_file" ] && [ -f "$sums_file" ]; then
+    local orig_name; orig_name="$(basename "$pickname")"
+    EXPECTED_SHA256="$(grep -E "[[:space:]](\./)?(${orig_name}|rathole-manager\.zip|rathole-manager\.tar\.gz)$" "$sums_file" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+  fi
   if [ -n "${EXPECTED_SHA256:-}" ]; then
     verify_sha256 "$bundle" "$EXPECTED_SHA256" || die "taiid-e checksum shekast khord (fail-closed)."
   fi
@@ -670,4 +683,6 @@ main(){
   esac
 }
 
-main
+if [ "${BOOTSTRAP_LIB_ONLY:-0}" != 1 ]; then
+  main
+fi

@@ -15,6 +15,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
       - name: Syntax check bash scripts (bash -n)
         run: |
           set -e
@@ -34,6 +38,15 @@ jobs:
               bash -n "$f"
             fi
           done
+
+      - name: ShellCheck critical shell scripts
+        run: |
+          echo "Running ShellCheck on root scripts..."
+          shellcheck -S warning -e SC1090,SC1091,SC2034,SC2154 bootstrap.sh install.sh install-node.sh install-panel.sh
+
+          echo "Running ShellCheck on package scripts..."
+          cd rathole-manager/rathole-manager
+          shellcheck -S warning -e SC1090,SC1091,SC2034,SC2154 common.sh update.sh install-node.sh install-panel.sh ratholectl ratholenode
 
   python-tests:
     name: Python Syntax & Unit Tests

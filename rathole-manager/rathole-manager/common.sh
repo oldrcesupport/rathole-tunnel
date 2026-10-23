@@ -114,10 +114,15 @@ rth_commit_config(){
       ;;
   esac
   local tmp
-  tmp="$(mktemp "${dir}/.$(basename "$dst").tmp.XXXXXX" 2>/dev/null || mktemp)" || {
-    err "sakht-e config-e staging shekast khord"; return 1;
-  }
-  chmod 600 "$tmp" 2>/dev/null || true
+  if ! tmp="$(mktemp "${dir}/.$(basename "$dst").tmp.XXXXXX" 2>/dev/null)"; then
+    err "sakht-e config-e staging dar directory-e maghsad shekast khord: $dir"
+    return 1
+  fi
+  if ! chmod 600 "$tmp" 2>/dev/null; then
+    err "tanzim-e dastresi (chmod 600) rooye config-e staging shekast khord: $tmp"
+    rm -f "$tmp"
+    return 1
+  fi
   if ! cp -f "$src" "$tmp" 2>/dev/null; then
     err "kopi be config-e staging shekast khord: $tmp"
     rm -f "$tmp"
@@ -155,13 +160,13 @@ rth_commit_config(){
       rm -f "$tmp"
       return 1
     fi
-    mv -f "$tmp" "$dst" || rc=1
-    rmdir "$d" 2>/dev/null
-    if [ "$rc" -ne 0 ]; then
-      err "jaye gozini-e config shekast khord (mv error): $dst"
+    if ! mv -f "$tmp" "$dst"; then
+      rmdir "$d" 2>/dev/null || true
       rm -f "$tmp"
+      err "jaye gozini-e config shekast khord (mv error): $dst"
       return 1
     fi
+    rmdir "$d" 2>/dev/null || true
   fi
   chmod 600 "$dst" 2>/dev/null || true
   rm -f "$src" "$tmp"

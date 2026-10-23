@@ -25,7 +25,9 @@ warn(){ printf '%s %s\n' "$(c_y '[*]')" "$*"; }
 err(){ printf '%s %s\n' "$(c_r '[!]')" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "bayad ba root ejra shavad (sudo)."
+if [ "${UPDATE_LIB_ONLY:-0}" != 1 ]; then
+  [ "$(id -u)" -eq 0 ] || die "bayad ba root ejra shavad (sudo)."
+fi
 
 # ---------- config ----------
 BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/rathole-manager}"
@@ -608,6 +610,7 @@ UNIT
   fi
 }
 
+if [ "${UPDATE_LIB_ONLY:-0}" != 1 ]; then
 # ==================== jarian-e asli ====================
 
 # --list-backups: faghat list bede va khárej shv
@@ -683,3 +686,4 @@ log "beroozresani/takmil kamel shod."
 [ "$NODE" -eq 1 ]  && echo "  barresi node:  $(c_y 'ratholenode ls')   va   $(c_y 'journalctl -u rathole-client -n 10 --no-pager')"
 [ "$HUB" -eq 1 ]   && echo "  barresi hub:   $(c_y 'systemctl status ratholehub --no-pager')"
 echo "  list-e backup-ha: $(c_y 'sudo bash update.sh --list-backups')   |   rollback: $(c_y 'sudo bash update.sh --rollback')"
+fi
