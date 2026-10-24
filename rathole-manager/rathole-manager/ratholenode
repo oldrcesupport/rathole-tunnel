@@ -254,7 +254,7 @@ if ! declare -F rth_commit_config >/dev/null 2>&1; then
   exit 1
 fi
 
-load_env(){ [ -f "$ENV_FILE" ] || die "node.env peyda nshd; aval install-node.sh ra ejra kon."; set -a; . "$ENV_FILE"; set +a; }
+load_env(){ [ -f "$ENV_FILE" ] || die "node.env peyda nshd. rah-e taid: ratholenode set SERVER <host:port>  (khodesh node.env misazad va bootstrap mikond) — ya install-node.sh ra ba --server --name --token ejra kon."; set -a; . "$ENV_FILE"; set +a; }
 
 # barresi tadakhol port inbound ba nginx node + sair servicehaye tunnel
 check_inbound(){
