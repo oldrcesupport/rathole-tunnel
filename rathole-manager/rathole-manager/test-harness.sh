@@ -920,8 +920,8 @@ if [ $? -ne 0 ]; then assert_ok 0 "udp block hazf shod"; else assert_ok 1 "udp b
 
 line "tst 45: gen_client fail-closed bedoon-e SERVER (bug-e hub add-svc rooye node-e taze)"
 # faghat khat-e SERVER ra hazf miknim (na file-ra) — load_env ba file-e mojood car mikond
-grep -v '^SERVER=' "$ROOT/etc/rathole/node.env" > "$ROOT/etc/rathole/node.env.tmp" && mv "$ROOT/etc/rathole/node.env.tmp" "$ROOT/etc/rathole/node.env"
-GEN_MSG="$(bash "$RUN_NODE" gen_client 2>&1)"
+sed -i '/^SERVER=/d' "$ROOT/etc/rathole/node.env"
+GEN_MSG="$(bash "$RUN_NODE" gen_client 2>&1)"; 
 rc=$?
 assert_eq "$rc" "1" "gen_client bedoon-e SERVER bayad fail shavad"
 echo "$GEN_MSG" | grep -q "SERVER tanzim nashode"
