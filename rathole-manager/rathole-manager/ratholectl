@@ -4466,7 +4466,7 @@ main(){
 
     control-path) cmd_control_path "${1:-show}" "$@" ;;
     game)   cmd_game "$@" ;;
-    udp)    shift; cmd_udp "$@" ;;
+    udp)    cmd_udp "$@" ;;   # main ghablan shift karde — shift-e dovom 'add' ra mikhord (bug-e v1.9.0-2)
     restart)
       need_root
       if systemctl restart "$RATHOLE_SVC"; then

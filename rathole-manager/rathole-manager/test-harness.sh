@@ -871,6 +871,10 @@ assert_eq "$POST_STATE_SHA" "$PRE_STATE_SHA" "state.json pas az shekast-e bind r
 assert_eq "$POST_CONF_SHA" "$PRE_CONF_SHA" "rathole.conf pas az shekast-e bind rollback shod"
 
 line "tst 42: UDP game forwarding — server.toml type=udp + public bind"
+# regression-e CLI-dispatch: `udp) cmd_udp "$@"` bedoon-e shift-e dovom bashad (main khodash shift
+# mikard; shift-e dovom 'add' ra mikhandid va cmd_udp be ls mraft — dar test-e functioni pinhan bood)
+grep -qE 'udp\)[[:space:]]+cmd_udp "\$@"' "$ROOT/ratholectl.lib"
+assert_ok $? "dispatcher-e udp shift-e dovom nadarad (cmd_udp args migirad)"
 bash "$RUN" cmd_udp add game1 25000 >/dev/null 2>&1
 rc=$?
 assert_ok "$rc" "cmd_udp add ejra shod"
