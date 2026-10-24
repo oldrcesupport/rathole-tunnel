@@ -502,6 +502,31 @@ def iran_main_server(s):
     host = str(s.get("host", ""))
     return ("%s:443" % host if host else ""), ""
 
+def _ensure_node_dial_target(node_server):
+    """Node-e taze-provision-shode node.env-e khali darad (SERVER namishenasad) va 'Add to node'
+    ba remote_addr-e khali client-e kharab tolid mikard (bug-e LIVE v1.9.4). agar SERVER set
+    nashode bashad, az iran_main_server adres-e dial ra migirad va rooye node set mikonad.
+    bazgasht: None = edame-be-kar; dict = khata (be client bargardanim)."""
+    try:
+        server_str, domain = iran_main_server(node_server)
+    except Exception:
+        return None
+    show = run_on_server(node_server, ["ratholenode", "show"], timeout=60)
+    for ln in (show.get("out") or "").splitlines():
+        if ln.startswith("SERVER=") and ln.split("=", 1)[1].strip():
+            return None  # az ghabl tanzim shode — dast nemizanim
+    if not server_str:
+        # panel bedoon domain va host-e SSH mafid nist — gen_client payam-e mafsur midahad
+        return None
+    r1 = run_on_server(node_server, ["ratholenode", "set", "SERVER", server_str], timeout=180)
+    if r1.get("rc") != 0:
+        return {"rc": r1.get("rc"), "out": r1.get("out", ""),
+                "err": "auto set SERVER shekast khord: " + (r1.get("err") or "")}
+    if domain:
+        run_on_server(node_server, ["ratholenode", "set", "TLS_HOSTNAME", domain], timeout=180)
+    return None
+
+
 def deploy_to_server(server):
     # apdit az GitHub: install.sh-e akharin Release ra rooye server migirad (ba mirror-haye
     # ghproxy baraye dor zadan-e filtering) va ba --update ejra mikonad. digar be bundle-e
@@ -1525,6 +1550,13 @@ class Handler(BaseHTTPRequestHandler):
         cmd = build_cmd(s.get("role"), action, args)
         if not cmd:
             return self._send(400, {"error": "unknown or invalid action"})
+        # bug-e LIVE (v1.9.4): nod-e taze-provision-shode SERVER nadarad va add_svc client-e
+        # kharab (remote_addr khali) tolid mikard. ghabl az add-svc, dial-target ra az
+        # server-e iran-e asli rooye node set kon.
+        if s.get("role") == "node" and action == "add_svc":
+            pre_err = _ensure_node_dial_target(s)
+            if pre_err:
+                return self._send(200, {"server": name, "cmd": "ratholenode set SERVER (auto)", **pre_err})
         res = run_on_server(s, cmd)
         redacted_cmd_str = redact_cmd(cmd)
         if action in WRITE_ACTIONS:

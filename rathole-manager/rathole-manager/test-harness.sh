@@ -918,6 +918,17 @@ fi
 grep -qE '^\[client\.services\.game1\]' "$ROOT/etc/rathole/client.toml"
 if [ $? -ne 0 ]; then assert_ok 0 "udp block hazf shod"; else assert_ok 1 "udp block hazf nashod"; fi
 
+line "tst 45: gen_client fail-closed bedoon-e SERVER (bug-e hub add-svc rooye node-e taze)"
+mv "$ROOT/etc/rathole/node.env" "$ROOT/etc/rathole/node.env.keep" 2>/dev/null
+GEN_MSG="$(bash "$RUN_NODE" gen_client 2>&1)"
+rc=$?
+assert_eq "$rc" "1" "gen_client bedoon-e SERVER bayad fail shavad"
+echo "$GEN_MSG" | grep -q "SERVER tanzim nashode"
+assert_ok $? "payam-e mafsur-e 'SERVER tanzim nashode' chap shavad (na crash-e bi-seda)"
+[ -f "$ROOT/etc/rathole/client.toml" ] && grep -q 'remote_addr = ""' "$ROOT/etc/rathole/client.toml"
+if [ $? -ne 0 ]; then assert_ok 0 "client.toml-e kharab tolid nashod"; else assert_ok 1 "client.toml-e kharab tolid shod!"; fi
+mv "$ROOT/etc/rathole/node.env.keep" "$ROOT/etc/rathole/node.env" 2>/dev/null
+
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"
 echo "=============================================="

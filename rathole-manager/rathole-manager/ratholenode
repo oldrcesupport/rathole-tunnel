@@ -290,6 +290,10 @@ check_port_conflict(){
 # tvlid client.toml az node.env + services.conf (hame zir yek [client])
 gen_client(){
   load_env
+  # fail-closed ba payam-e mafsur: SERVER-e khali = client.toml ba remote_addr-e khali =
+  # crash-e bi-seda-e rathole-client (bug-e LIVE: 'Add to node'-e hub rooye node-e
+  # taze-provision-shode inja mikhord).
+  [ -n "${SERVER:-}" ] || die "SERVER tanzim nashode. rooye node ejra kon: ratholenode set SERVER <host:port>   — ya dar hub dokme-ye 'Add to node' bezanid (khodkar az server-e iran-e asli set mishavad)."
   [ -f "$SVC_FILE" ] || die "hich srvisi tarif nashode ($SVC_FILE). ba 'ratholenode add-svc' ezafe kon."
   # SERVER endpoint-e dial ast; TLS_HOSTNAME (ekhtiari) SNI/cert hostname ra joda negah midarad.
   # config-haye ghadimi SERVER-only sazgar mimanand; baraye IP+self-signed, TLS_TRUSTED_ROOT
