@@ -188,6 +188,16 @@ def build_iran_cmd(action, a):
     if action == "backhaul_status": return ["ratholectl", "backhaul", "status"]
     if action == "backhaul_logs":   return ["ratholectl", "backhaul", "logs"]
     if action == "backhaul_show":   return ["ratholectl", "backhaul", "show"]
+    # ---- gme-ye UDP: ratholectl udp add/rm/ls (v1.9.2) ----
+    if action in ("udp_add", "udp_rm"):
+        name = a.get("name", "")
+        if not RE_NAME.match(name): return None
+        if action == "udp_add":
+            port = str(a.get("port", ""))
+            if not is_valid_port(port): return None
+            return ["ratholectl", "udp", "add", name, port]
+        return ["ratholectl", "udp", "rm", name]
+    if action == "udp_ls": return ["ratholectl", "udp", "ls"]
     if action == "backhaul_off":    return ["ratholectl", "backhaul", "off"]
     if action == "backhaul_on":
         port      = str(a.get("port", "3080") or "3080")
@@ -520,6 +530,7 @@ WRITE_ACTIONS = {
     "direct_on", "direct_off",
     "noise_on", "noise_off", "noise_node_on", "noise_node_off",
     "backhaul_on", "backhaul_off", "backhaul_node_on", "backhaul_node_off",
+    "udp_add", "udp_rm",
     "proxy_add", "proxy_rm",
 
     "backup", "enable", "regen_full", "regen",
