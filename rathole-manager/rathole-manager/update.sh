@@ -632,6 +632,17 @@ if [ "$DO_LIST" -eq 1 ]; then
   exit 0
 fi
 
+# ghofl-e serial-sazi-e update/rollback: do update-e hamzaman (masalan dokme-ye Update-e hub
+# + CLI-e dasti) snapshot-ha va binary-ha ra mishkanand — bug-e LIVE: 203/EXEC rooye binary
+# (truncate-e hamzaman-e core-install) + flock timeout-e state + rollback-e khatakhorde.
+# tamame rah-ha (update/adi/rollback) az inja be bad zir-e in ghofl-and.
+UPDATE_LOCK="${RATHOLE_UPDATE_LOCK:-/var/lock/rathole-update.lock}"
+exec 8>>"$UPDATE_LOCK"
+if ! flock -w 10 8; then
+  die "yek update/rollback-e digar dar hal-e ejra ast (ya 10s azad nashod); chand sanie bad dobare talash kon."
+fi
+log "ghofl-e update gereft shod (serial-sazi)."
+
 # --rollback: bazgasht-e dasti
 if [ "$DO_ROLLBACK" -eq 1 ]; then
   detect_roles

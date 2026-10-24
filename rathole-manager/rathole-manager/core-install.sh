@@ -58,5 +58,8 @@ if [ "$actual_ver" != "$REQUIRED_VERSION" ]; then
 fi
 
 # ---- nasb binary ----
-install -m 0755 "$tmp" /usr/local/bin/rathole
+# ATOMIC: ghablan `install` mostaghiman destinasion-ra truncate mikard — dar ain window,
+# har exec/systemctl restart-e digar 203/EXEC migereft (bug-e LIVE: do update-e hamzaman).
+install -m 0755 "$tmp" /usr/local/bin/rathole.new
+mv -f /usr/local/bin/rathole.new /usr/local/bin/rathole
 log "rathole core nasb shod: $REQUIRED_VERSION → /usr/local/bin/rathole"

@@ -930,6 +930,13 @@ assert_ok $? "payam-e mafsur-e 'SERVER tanzim nashode' chap shavad (na crash-e b
 if [ $? -ne 0 ]; then assert_ok 0 "client.toml-e kharab tolid nashod"; else assert_ok 1 "client.toml-e kharab tolid shod!"; fi
 printf 'SERVER=btli.ir:443\n' >> "$ROOT/etc/rathole/node.env"
 
+
+line "tst 46: update serialization lock (jelogiri az do update-e hamzaman — bug-e 203/EXEC)"
+grep -q "rathole-update.lock" "$BASE/update.sh"
+assert_ok $? "ghofl-e serialize-e update dar update.sh hast"
+grep -q "rathole.new" "$BASE/core-install.sh"
+assert_ok $? "core-install atomic ast (install be .new + mv)"
+
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"
 echo "=============================================="
