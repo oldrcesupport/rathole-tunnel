@@ -945,6 +945,9 @@ grep -q '~\*x_padding=' "$CONF_FILE"
 assert_ok $? "x_padding query map hast"
 grep -q 'map "$is_tunnel_req2:$is_sub_req" $backend_port' "$CONF_FILE"
 assert_ok $? "backend map az is_tunnel_req2 estefade mikond"
+# regression v1.9.9: regex-e ~+ dar map → pcre2_compile fail → tamame mutator-ha rollback
+! grep -q '"~+"' "$CONF_FILE"
+if [ $? -eq 0 ]; then assert_ok 0 "regex-e namotabar-e ~+ dar conf nist"; else assert_ok 1 "regex-e ~+ invalid dar conf!"; fi
 ! grep -qE 'map "\$is_tunnel_req:\$is_sub_req" \$backend_port' "$CONF_FILE"
 if [ $? -eq 0 ]; then assert_ok 0 "map-e ghadimi jaigozin shod"; else assert_ok 1 "map-e ghadimi hanooz hast!"; fi
 

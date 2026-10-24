@@ -177,7 +177,7 @@ resolve_dl(){
 main(){
   install_prereqs
   local tmp; tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  trap 'rm -rf "${tmp:-}"' EXIT
 
   # bedoon-e flag/env va ba terminal → beporsim (Enter = latest). ba flag ya bedoon-e tty:
   # hich porseshi nist va raftar-e ghabli (latest) dast-nakhorde mimanad.

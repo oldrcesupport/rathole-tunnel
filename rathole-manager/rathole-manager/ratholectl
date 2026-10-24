@@ -980,7 +980,7 @@ PXB
     echo "# amn ast: GET-e node-path ba in alamat be tunnel miravad; GET-e mamuli (probe) be daf."
     echo "map \"\$http_x_padding\" \$is_xhttp_hdr {"
     echo "    default      0;"
-    echo "    \"~+\"        1;"
+    echo "    \"~.+\"       1;"
     echo "}"
     echo "map \"\$args\" \$is_xhttp_q {"
     echo "    default            0;"
