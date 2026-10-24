@@ -937,6 +937,17 @@ assert_ok $? "ghofl-e serialize-e update dar update.sh hast"
 grep -q "rathole.new" "$BASE/core-install.sh"
 assert_ok $? "core-install atomic ast (install be .new + mv)"
 
+
+line "tst 47: XHTTP GET-download routing (x_padding marker) + probe-safe decoy"
+grep -q 'map "$http_x_padding" $is_xhttp_hdr' "$CONF_FILE"
+assert_ok $? "x_padding header map hast"
+grep -q '~\*x_padding=' "$CONF_FILE"
+assert_ok $? "x_padding query map hast"
+grep -q 'map "$is_tunnel_req2:$is_sub_req" $backend_port' "$CONF_FILE"
+assert_ok $? "backend map az is_tunnel_req2 estefade mikond"
+! grep -qE 'map "\$is_tunnel_req:\$is_sub_req" \$backend_port' "$CONF_FILE"
+if [ $? -eq 0 ]; then assert_ok 0 "map-e ghadimi jaigozin shod"; else assert_ok 1 "map-e ghadimi hanooz hast!"; fi
+
 echo "=============================================="
 echo "Harness Summary: PASS=$PASS_COUNT  FAIL=$FAIL_COUNT"
 echo "=============================================="
